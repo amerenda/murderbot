@@ -57,13 +57,14 @@ stop_llama_server() {
 # ─── KILL COMFYUI IF RUNNING (for --restart) ────────────────────────────────
 stop_comfyui() {
   local PIDS
-  PIDS=$(pgrep -f "comfyui.*main.py" 2>/dev/null || true)
+  # Match the actual process: "python main.py --listen" started from comfyui dir
+  PIDS=$(pgrep -f "main\.py --listen" 2>/dev/null || true)
   if [ -n "$PIDS" ]; then
     echo "[FLUX] Stopping ComfyUI..."
     echo "$PIDS" | xargs kill
     sleep 3
-    if pgrep -f "comfyui.*main.py" > /dev/null 2>&1; then
-      echo "$(pgrep -f 'comfyui.*main.py')" | xargs kill -9
+    if pgrep -f "main\.py --listen" > /dev/null 2>&1; then
+      echo "$(pgrep -f 'main\.py --listen')" | xargs kill -9
       sleep 1
     fi
     echo "[FLUX] ComfyUI stopped."
@@ -106,24 +107,24 @@ install_if_missing() {
     cd "$TARGET" && git pull origin "$BRANCH" > /dev/null 2>&1 || true
     # Install/update pip deps if requirements.txt exists
     if [ -f "requirements.txt" ]; then
-      source "$COMFYUI_DIR/.venv/bin/activate" 2>/dev/null || true
+      source "$COMFYUI_DIR/venv/bin/activate" 2>/dev/null || true
       pip install -r requirements.txt > /dev/null 2>&1 || true
       deactivate 2>/dev/null || true
     fi
   else
     echo "[FLUX] Cloning $DIR_NAME custom nodes..."
-    git clone "https://github.com/${REPO_URL}.git" "$TARGET" --branch "$BRANCH" --depth 1 > /dev/null 2>&1
+    git clone "git@github.com:${REPO_URL}.git" "$TARGET" --branch "$BRANCH" --depth 1 > /dev/null 2>&1
     # Install deps if requirements.txt exists
     if [ -f "$TARGET/requirements.txt" ]; then
-      cd "$TARGET" && source "$COMFYUI_DIR/.venv/bin/activate" 2>/dev/null || true
+      cd "$TARGET" && source "$COMFYUI_DIR/venv/bin/activate" 2>/dev/null || true
       pip install -r requirements.txt > /dev/null 2>&1 || true
       deactivate 2>/dev/null || true
     fi
   fi
 }
 
-# ComfyUI-GGFLUX (city96) — load GGUF diffusion models in ComfyUI
-install_if_missing "city96/ComfyUI-GGFLUX" main
+# ComfyUI-GGUF (city96) — load GGUF diffusion models in ComfyUI
+install_if_missing "city96/ComfyUI-GGUF" main
 # comfyui-ollama (stavsap) — remote Ollama nodes for prompt expansion via Mac Mini brain
 install_if_missing "stavsap/comfyui-ollama" v2
 
@@ -156,13 +157,12 @@ echo "  ComfyUI:   http://0.0.0.0:${COMFYUI_PORT}"
 echo ""
 
 cd "$COMFYUI_DIR"
-source "$COMFYUI_DIR/.venv/bin/activate"
+source "$COMFYUI_DIR/venv/bin/activate"
 
 python main.py \
   --listen 0.0.0.0 \
   --port "$COMFYUI_PORT" \
   --disable-auto-launch \
-  --extra-model-paths-prefix "./extra_model_paths.yaml:" \
   2>&1 &
 COMFYUI_PID=$!
 
