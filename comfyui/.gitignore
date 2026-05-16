@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+/output/
+/input/
+!/input/example.png
+/temp/
+extra_model_paths.yaml
+.vs
+.vscode/
+.idea/
+venv*/
+.venv/
+web_custom_versions/
+.DS_Store
+filtered-openapi.yaml
+uv.lock
+.comfy_environment
