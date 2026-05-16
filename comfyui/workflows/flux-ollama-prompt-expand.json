@@ -92,7 +92,7 @@
         { "name": "CLIP", "type": "CLIP", "links": [5, 6] }
       ],
       "properties": { "Node name for S&R": "DualCLIPLoaderGGUF" },
-      "widgets_values": ["clip_l-Q8_0.gguf", "t5xxl-Q4_K.gguf", "flux"]
+      "widgets_values": ["clip_l.safetensors", "t5xxl_fp8_e4m3fn.safetensors", "flux"]
     },
     {
       "id": 5,
