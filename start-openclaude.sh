@@ -58,16 +58,25 @@ stop_server() {
   fi
 }
 
-# ─── STOP COMFYUI (free VRAM for LLM) ────────────────────────────────────────
+# ─── STOP COMFYUI + IMAGE GENERATION (free VRAM for LLM) ────────────────────
 stop_comfyui() {
+  # Kill tuning/batch scripts first so they don't requeue jobs
+  local BATCH_PIDS
+  BATCH_PIDS=$(pgrep -f "run-tuning-batch\.py\|run-flux-batch\.py" 2>/dev/null || true)
+  if [ -n "$BATCH_PIDS" ]; then
+    echo "[OPENCLAUDE] Stopping image generation batch (PIDs: $BATCH_PIDS)..."
+    echo "$BATCH_PIDS" | xargs kill 2>/dev/null || true
+    sleep 1
+  fi
+
   local PIDS
-  PIDS=$(pgrep -f "comfyui.*main.py" 2>/dev/null || true)
+  PIDS=$(pgrep -f "main\.py --listen" 2>/dev/null || true)
   if [ -n "$PIDS" ]; then
-    echo "[OPENCLAUDE] Stopping ComfyUI (free VRAM for Qwen3.6 ~24GB)..."
+    echo "[OPENCLAUDE] Stopping ComfyUI / FLUX (free VRAM for Qwen3.6 ~24GB)..."
     echo "$PIDS" | xargs kill
     sleep 3
-    if pgrep -f "comfyui.*main.py" > /dev/null 2>&1; then
-      echo "$(pgrep -f 'comfyui.*main.py')" | xargs kill -9
+    if pgrep -f "main\.py --listen" > /dev/null 2>&1; then
+      pgrep -f "main\.py --listen" | xargs kill -9
       sleep 1
     fi
     echo "[OPENCLAUDE] ComfyUI stopped."
@@ -169,8 +178,8 @@ if pgrep -f "llama-server" > /dev/null 2>&1; then
 fi
 
 # ─── STOP COMFYUI (if running) ──────────────────────────────────────────────
-# Kill ComfyUI/FLUX to free VRAM for Qwen3.6 (~24GB needed)
-if pgrep -f "comfyui.*main.py" > /dev/null 2>&1; then
+# Kill ComfyUI/FLUX (and any batch scripts) to free VRAM for Qwen3.6 (~24GB needed)
+if pgrep -f "main\.py --listen\|run-tuning-batch\.py\|run-flux-batch\.py" > /dev/null 2>&1; then
   stop_comfyui
 fi
 
