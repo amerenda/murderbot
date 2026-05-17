@@ -149,7 +149,7 @@
         { "name": "MODEL", "type": "MODEL", "links": [9] }
       ],
       "properties": { "Node name for S&R": "UnetLoaderGGUF" },
-      "widgets_values": ["flux1-dev-Q4_K.gguf"]
+      "widgets_values": ["flux1-dev-Q8_0.gguf"]
     },
     {
       "id": 8,

@@ -29,7 +29,7 @@ OLLAMA_MODEL   = "llama3.1:8b"
 OUTPUT_DIR     = Path("/home/alex/claude/comfyui/output/tuning2")
 COMFYUI_OUTPUT = Path("/home/alex/claude/comfyui/output")
 
-DEFAULT_FLUX_MODEL = "flux1-dev-Q4_K.gguf"
+DEFAULT_FLUX_MODEL = "flux1-dev-Q8_0.gguf"
 
 OLLAMA_SYSTEM = (
     "You are a prompt engineer for photorealistic AI image generation. "
