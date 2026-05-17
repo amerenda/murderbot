@@ -62,7 +62,7 @@ stop_server() {
 stop_comfyui() {
   # Kill tuning/batch scripts first so they don't requeue jobs
   local BATCH_PIDS
-  BATCH_PIDS=$(pgrep -f "run-tuning-batch\.py\|run-flux-batch\.py" 2>/dev/null || true)
+  BATCH_PIDS=$(pgrep -f "run-tuning-batch\.py|run-flux-batch\.py" 2>/dev/null || true)
   if [ -n "$BATCH_PIDS" ]; then
     echo "[OPENCLAUDE] Stopping image generation batch (PIDs: $BATCH_PIDS)..."
     echo "$BATCH_PIDS" | xargs kill 2>/dev/null || true
@@ -179,7 +179,7 @@ fi
 
 # ─── STOP COMFYUI (if running) ──────────────────────────────────────────────
 # Kill ComfyUI/FLUX (and any batch scripts) to free VRAM for Qwen3.6 (~24GB needed)
-if pgrep -f "main\.py --listen\|run-tuning-batch\.py\|run-flux-batch\.py" > /dev/null 2>&1; then
+if pgrep -f "main\.py --listen|run-tuning-batch\.py|run-flux-batch\.py" > /dev/null 2>&1; then
   stop_comfyui
 fi
 
