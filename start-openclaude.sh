@@ -160,7 +160,7 @@ if pgrep -f "llama-server" > /dev/null 2>&1; then
   CURRENT_MODEL_PATH=$(curl -sf "http://127.0.0.1:$PORT/v1/models" 2>/dev/null \
     | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data'][0]['id'])" 2>/dev/null || true)
 
-  if [ "$CURRENT_MODEL_PATH" = "$MODEL" ]; then
+  if [ "$(basename "$CURRENT_MODEL_PATH")" = "$(basename "$MODEL")" ]; then
     # Same model — just connect
     echo "Running server is already serving $(basename "$MODEL") — connecting."
     export OPENAI_API_KEY="local"
