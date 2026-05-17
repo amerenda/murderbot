@@ -225,8 +225,8 @@ SERVER_PID=$!
 echo "Waiting for llama-server to load model..."
 ATTEMPTS=0
 until curl -sf "http://$HOST:$PORT/health" > /dev/null 2>&1; do
-  if [ "$ATTEMPTS" -ge 60 ]; then
-    echo "ERROR: Timeout waiting for server after 120s." >&2
+  if [ "$ATTEMPTS" -ge 180 ]; then
+    echo "ERROR: Timeout waiting for server after 360s." >&2
     echo "Check $BASE_LOG for details." >&2
     exit 1
   fi
