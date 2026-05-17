@@ -18,10 +18,15 @@ if [[ "${1:-}" == "--restart" ]]; then
 fi
 
 # ─── ENV VARS (quality tuning) ──────────────────────────────────────────────
-FLUX_GUIDANCE_STRENGTH="${FLUX_GUIDANCE_STRENGTH:-3.5}"   # FluxGuidance strength (default ~3.5)
-STEPS="${STEPS:-25}"                                      # Sampling steps (sweet spot 20-30)
+FLUX_GUIDANCE_STRENGTH="${FLUX_GUIDANCE_STRENGTH:-3.5}"   # tuning winner: 3.5 (5/10 subjects)
+STEPS="${STEPS:-20}"                                      # tuning winner: 20 steps (5/10 subjects)
 RESOLUTION="${RESOLUTION:-1024}"                          # Image size: RESOLUTIONxRESOLUTION
 SEED="${SEED:---1}"                                       # -1 = random; set to fixed number for reproducibility
+# Subject-type guidance notes from tuning (2026-05-17):
+#   portraits (people):      2.5-3.5  (lower = more natural skin/faces)
+#   vivid/high-contrast:     7.0      (birds, food)
+#   complex indoor scenes:   5.0 + 30 steps
+#   landscapes/architecture: 3.5
 
 # Model paths
 FLUX_DIR="/mnt/storage/models/image/flux1-dev-gguf"
