@@ -1,0 +1,112 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png",
+      "upload": "image"
+    }
+  },
+  "2": {
+    "class_type": "CannyEdgePreprocessor",
+    "inputs": {
+      "image": ["1", 0],
+      "low_threshold": 100,
+      "high_threshold": 200,
+      "resolution": 1024
+    }
+  },
+  "3": {
+    "class_type": "ControlNetLoader",
+    "inputs": {
+      "control_net_name": "flux-canny-controlnet-v3.safetensors"
+    }
+  },
+  "4": {
+    "class_type": "DualCLIPLoaderGGUF",
+    "inputs": {
+      "clip_name1": "clip_l.safetensors",
+      "clip_name2": "t5xxl_fp16.safetensors",
+      "type": "flux"
+    }
+  },
+  "5": {
+    "class_type": "CLIPTextEncodeFlux",
+    "inputs": {
+      "clip": ["4", 0],
+      "clip_l": "portrait of a woman, soft window light",
+      "t5xxl": "portrait of a woman, soft window light, photorealistic, shot on Sony A7R V 85mm f/1.4, shallow depth of field, Rembrandt lighting, film grain",
+      "guidance": 3.5
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncodeFlux",
+    "inputs": {
+      "clip": ["4", 0],
+      "clip_l": "",
+      "t5xxl": "",
+      "guidance": 3.5
+    }
+  },
+  "7": {
+    "class_type": "ControlNetApplyAdvanced",
+    "inputs": {
+      "positive": ["5", 0],
+      "negative": ["6", 0],
+      "control_net": ["3", 0],
+      "image": ["2", 0],
+      "strength": 0.8,
+      "start_percent": 0.0,
+      "end_percent": 0.6,
+      "vae": ["10", 0]
+    }
+  },
+  "8": {
+    "class_type": "UnetLoaderGGUF",
+    "inputs": {
+      "unet_name": "flux1-dev-Q4_K.gguf"
+    }
+  },
+  "9": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    }
+  },
+  "10": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    }
+  },
+  "11": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["8", 0],
+      "positive": ["7", 0],
+      "negative": ["7", 1],
+      "latent_image": ["9", 0],
+      "seed": -1,
+      "steps": 20,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "beta",
+      "denoise": 1.0
+    }
+  },
+  "12": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["11", 0],
+      "vae": ["10", 0]
+    }
+  },
+  "13": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["12", 0],
+      "filename_prefix": "flux_controlnet_canny"
+    }
+  }
+}
