@@ -113,7 +113,7 @@ def build_comfy_prompt(base_prompt, expanded_prompt, preset, seed, save_prefix,
     model_src = ["7", 0]
 
     nodes = {
-        "4":  {"class_type": "DualCLIPLoaderGGUF",  "inputs": {"clip_name1": "clip_l.safetensors", "clip_name2": "t5xxl_fp8_e4m3fn.safetensors", "type": "flux"}},
+        "4":  {"class_type": "DualCLIPLoaderGGUF",  "inputs": {"clip_name1": "clip_l.safetensors", "clip_name2": "t5xxl_fp16.safetensors", "type": "flux"}},
         "7":  {"class_type": "UnetLoaderGGUF",       "inputs": {"unet_name": model}},
         "8":  {"class_type": "EmptyLatentImage",     "inputs": {"width": width, "height": height, "batch_size": 1}},
         "10": {"class_type": "VAELoader",            "inputs": {"vae_name": "ae.safetensors"}},
