@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Passenger — Image Comparison</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; }
+
+.setup-page { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; gap: 1.5rem; padding: 2rem; }
+.setup-page h1 { font-size: 2rem; color: #fff; }
+.setup-page p { color: #999; text-align: center; line-height: 1.6; max-width: 400px; }
+
+.ctrl-group { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.85rem; color: #aaa; width: 100%; max-width: 420px; }
+input, select { padding: 0.6rem 1rem; border-radius: 6px; background: #1a1a1a; color: #e0e0e0; font-size: 0.95rem; border: 1px solid #333; }
+input:focus, select:focus { outline: none; border-color: #4a8; }
+
+button.primary { background: #2a7a4a; color: #fff; font-weight: 600; cursor: pointer; border: none; padding: 0.75rem 3rem; font-size: 1rem; border-radius: 6px; }
+button.primary:hover { background: #3a9a5a; }
+button.secondary { background: none; border: 1px solid #333; color: #bbb; cursor: pointer; padding: 0.4rem 0.8rem; border-radius: 4px; font-size: 0.8rem; }
+button.secondary:hover { border-color: #4a8; color: #fff; }
+
+/* Game */
+.game { display: none; flex-direction: column; min-height: 100vh; }
+.game.active { display: flex; }
+
+.top-bar { display: flex; align-items: center; justify-content: space-between; padding: 0.75rem 1.5rem; background: #111; border-bottom: 1px solid #222; gap: 1rem; flex-wrap: wrap; }
+.cat-label { font-weight: 600; font-size: 1.1rem; color: #fff; }
+.prog { font-size: 0.85rem; color: #888; }
+.top-actions { display: flex; gap: 0.4rem; }
+
+.compare-area { flex: 1; display: flex; align-items: stretch; justify-content: center; padding: 0.75rem; gap: 0.6rem; }
+
+.card { flex: 1; max-width: 48%; border-radius: 8px; overflow: hidden; cursor: pointer; background: #111; display: flex; align-items: center; justify-content: center; transition: outline-color 0.15s; }
+.card:hover { outline: 3px solid #3a8a5a; }
+.card img { width: 100%; height: auto; max-height: calc(100vh - 260px); object-fit: contain; display: block; pointer-events: none; }
+
+.toast { position: fixed; bottom: 2rem; left: 50%; transform: translateX(-50%) translateY(130%); background: #8b4513; color: #fff; padding: 0.7rem 1.5rem; border-radius: 6px; font-size: 0.9rem; transition: transform 0.3s ease; z-index: 100; max-width: 90vw; text-align: center; pointer-events: none; }
+.toast.show { transform: translateX(-50%) translateY(0); }
+
+/* Results */
+.results-page { display: none; flex-direction: column; align-items: center; padding: 2rem; min-height: 100vh; gap: 1rem; }
+.results-page.active { display: flex; }
+.results-table { width: min(650px, 95vw); border-collapse: collapse; font-size: 0.85rem; }
+.results-table th, .results-table td { padding: 0.35rem 0.7rem; text-align: left; border-bottom: 1px solid #222; }
+.results-table th { color: #999; font-weight: 500; }
+
+.skip-btn { background: none; border: none; color: #666; cursor: pointer; padding: 0.4rem; font-size: 0.85rem; }
+.skip-btn:hover { color: #aaa; }
+.empty-msg { display: flex; align-items: center; justify-content: center; flex: 1; color: #888; text-align: center; font-size: 1.2rem; }
+
+@media (max-width: 768px) { .card { max-width: 100%; } }
+</style>
+</head>
+<body>
+
+<!-- Setup -->
+<div class="setup-page" id="setupPage">
+  <h1>Passenger</h1>
+  <p>Pairwise image comparison. Click whichever you like better.</p>
+  <div class="ctrl-group">
+    <label for="dirUrl">Image directory URL (relative to this page)</label>
+    <input type="text" id="dirUrl" value="/home/alex/claude/comfyui/output/tuning2" placeholder="Full path or URL to image directory">
+  </div>
+  <p style="font-size:0.8rem; color:#666;" id="loadStatus"></p>
+  <button class="primary" onclick="init()">Start</button>
+  <button class="secondary" onclick="localStorage.removeItem('passenger_votes'); showToast('Data cleared.');">Clear data</button>
+</div>
+
+<!-- Game -->
+<div class="game" id="gamePage">
+  <div class="top-bar">
+    <span class="cat-label" id="catLabel"></span>
+    <span class="prog" id="progBar"></span>
+    <div class="top-actions">
+      <button onclick="showResults()">Review</button>
+      <button onclick="exportVotes()">Export</button>
+      <button onclick="resetAll()">Reset</button>
+    </div>
+  </div>
+  <div class="compare-area" id="area"></div>
+  <div style="display:flex; justify-content:center;"><span class="skip-btn" onclick="skipPair()">Skip →</span></div>
+</div>
+
+<!-- Results -->
+<div class="results-page" id="resultsPage">
+  <h2>Votes</h2>
+  <table class="results-table"><thead><tr><th>#</th><th>Category</th><th>Winner</th><th>Loser</th></tr></thead><tbody id="voteBody"></tbody></table>
+  <p style="color:#555; font-size:0.8rem;" id="voteCount"></p>
+  <div style="display:flex; gap:0.6rem;">
+    <button onclick="exportVotes()" class="secondary">Export JSON</button>
+    <button onclick="backToGame()" class="secondary">Continue</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── State ───────────────────────────────────────────────
+let dirUrl = '/tuning2';
+let presets = [];     // { subject, preset (letter), filename (without .png) }
+let pairs = [];       // { category, a: preset, b: preset, done: bool }
+let idx = 0;          // current index in `pairs`
+let rejected = new Set();   // preset keys that lost during stray comparison and won again → warning
+let votes = JSON.parse(localStorage.getItem('passenger_votes') || '[]');
+
+// ── Load & init ────────────────────────────────────────
+
+async function init() {
+  dirUrl = document.getElementById('dirUrl').value.replace(/\/$/, '');
+  const statusEl = document.getElementById('loadStatus');
+
+  try {
+    await loadManifest();
+  } catch (e) {
+    console.warn('manifest failed:', e);
+    statusEl.textContent = 'No manifest — trying directory scan...';
+    try { await loadByScan(); }
+    catch(e2) { alert('Cannot load images: ' + e2.message); return; }
+  }
+
+  if (!presets.length) { alert('No presets found'); return; }
+
+  statusEl.textContent = `${presets.length} presets across ${new Set(presets.map(p => p.subject)).size} categories`;
+  buildPairs();
+  startGame();
+}
+
+// Parse manifest.json → preset list with metadata
+async function loadManifest() {
+  const resp = await fetch(`${dirUrl}/manifest.json?t=${Date.now()}`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const raw = JSON.parse(await resp.text());
+
+  let runs;
+  if (typeof raw.runs === 'string') {
+    runs = JSON.parse(raw.runs);
+  } else if (Array.isArray(raw)) {
+    runs = raw;
+  } else {
+    throw new Error('bad manifest format');
+  }
+
+  presets = [];
+  for (const r of runs) {
+    const subject = r.subject || '';
+    const preset = String(r.preset); // "A", "B"...
+    // image_file is absolute path: /home/.../tuning2/asian-woman__A__20steps__3.5guid...png
+    let fname = `${subject}__${preset}`; // base without params — we append the full pattern below
+    if (r.image_file) {
+      const basename = r.image_file.split('/').pop(); // e.g. asian-woman__A__20steps__3.5guid...png
+      fname = basename.replace(/\.png$/, '');       // strip .png
+    } else {
+      fname = `${subject}__${preset}__`; // placeholder for scanned entries
+    }
+    presets.push({ subject, preset, filename: fname });
+  }
+}
+
+// Fallback: parse HTML directory listing (python -m http.server ?C=N&O=D)
+async function loadByScan() {
+  const resp = await fetch(`${dirUrl}?C=N&O=D`);
+  if (!resp.ok) throw new Error('no dir listing');
+  const html = await resp.text();
+
+  presets = [];
+  // Collect all .png links, then dedupe by subject+preset letter
+  const seen = {};
+  for (const m of [...html.matchAll(/href="([^"]+\.png)"[^>]*>/g)]) {
+    const link = decodeURIComponent(m[1]);
+    // Pattern: subject__VAR__.png  where VAR is a single capital letter A-Z, then more params follow __...
+    const match = link.match(/^([^_]+(?:-[a-z]+)?)__([A-Z])__/);
+    if (!match) continue;
+    const subject = match[1];
+    const preset = match[2];
+    const key = `${subject}::${preset}`; // dedupe key
+    if (seen[key]) continue;
+    seen[key] = true;
+
+    const fullFname = link.replace(/\.png$/, '');
+    presets.push({ subject, preset, filename: fullFname });
+  }
+
+  if (!presets.length) throw new Error('no images found');
+}
+
+// ── Pair building (combinatorial within category) ──────
+
+function buildPairs() {
+  const groups = {};
+  for (const p of presets) {
+    (groups[p.subject] ||= []).push(p);
+  }
+
+  pairs = [];
+  for (const [cat, items] of Object.entries(groups).sort()) {
+    if (items.length < 2) continue;
+    for (let i = 0; i < items.length; i++) {
+      for (let j = i + 1; j < items.length; j++) {
+        pairs.push({ category: cat, a: items[i], b: items[j] });
+      }
+    }
+  }
+
+  shuffle(pairs);
+}
+
+function presetKey(p) { return `${p.subject}::${p.preset}`; }
+
+// ── Game flow ───────────────────────────────────────────
+
+let pairDone = new Set(); // track which pairs have been voted on (by index or a+b combo)
+
+function startGame() {
+  document.getElementById('setupPage').style.display = 'none';
+  document.getElementById('gamePage').classList.add('active');
+  idx = 0;
+  rejected.clear();
+  pairDone.clear();
+  renderPair();
+}
+
+function isVoted(pair) { return pairDone.has(`${presetKey(pair.a)}|${presetKey(pair.b)}`); }
+function markVoted(pair) { pairDone.add(`${presetKey(pair.a)}|${presetKey(pair.b)}`); pair.done = true; }
+
+function renderPair() {
+  const area = document.getElementById('area');
+  area.innerHTML = '';
+
+  // Advance past exhausted pairs
+  while (idx < pairs.length && isVoted(pairs[idx])) idx++;
+
+  if (idx >= pairs.length) { emptyScreen(); return; }
+
+  const pair = pairs[idx];
+  document.getElementById('catLabel').textContent = pair.category;
+
+  const doneCount = pairDone.size;
+  document.getElementById('progBar').textContent = `${doneCount} / ${pairs.length}`;
+
+  for (const key of ['a', 'b']) {
+    const item = pair[key];
+    if (!item) continue;
+
+    const card = document.createElement('div');
+    card.className = 'card';
+
+    const img = document.createElement('img');
+    img.src = `${dirUrl}/${encodeURIComponent(item.filename)}.png`;
+    img.alt = '';
+    img.loading = 'lazy';
+    img.style.opacity = '0.25';
+    img.onload = () => { img.style.opacity = '1'; };
+
+    // Tooltip from metadata
+    const tips = [];
+    if (item.steps !== undefined) tips.push(`${item.steps} steps`);
+    if (item.guidance !== undefined) tips.push(`g${item.guidance}`);
+    if (item.sampler) tips.push(item.sampler);
+    if (tips.length) img.title = tips.join(', ');
+
+    card.appendChild(img);
+    card.addEventListener('click', () => onVote(pair, key));
+    area.appendChild(card);
+  }
+}
+
+function emptyScreen() {
+  document.getElementById('area').innerHTML = `<div class="empty-msg">Comparisons complete!<br><span style="font-size:0.85rem; color:#666;">Review or export your votes.</span></div>`;
+}
+
+// ── Voting logic ────────────────────────────────────────
+
+function onVote(pair, pickedSide) {
+  const winner = pair[pickedSide];
+  const loser = pair[pickedSide === 'a' ? 'b' : 'a'];
+
+  // Record vote
+  votes.push({
+    timestamp: new Date().toISOString(),
+    category: pair.category,
+    winnerKey: presetKey(winner),
+    loserKey: presetKey(loser)
+  });
+  localStorage.setItem('passenger_votes', JSON.stringify(votes));
+
+  // Stray comparison logic: if this was a "rejected vs popular" comparison and the rejected one won, warn
+  const pairType = pair._type;
+  if (pairType === 'stray' && rejected.has(presetKey(winner))) {
+    showToast(`⚠️ "${presetKey(winner)}" was already rejected — but won again! Review may be needed.`);
+  }
+
+  // Mark loser as rejected for stray logic
+  rejected.add(presetKey(loser));
+
+  markVoted(pair);
+  idx++;
+
+  // If all normal pairs are done, inject stray comparisons
+  if (idx >= pairs.length) {
+    injectStrays();
+  }
+
+  renderPair();
+}
+
+function skipPair() {
+  const pair = pairs[idx];
+  if (!pair || isVoted(pair)) return;
+  // Skip adds both to a "skipped" pile — don't reject either, just move on
+  markVoted(pair);
+  idx++;
+  renderPair();
+}
+
+// ── Stray injection ─────────────────────────────────────
+// After all combinatorial pairs are exhausted, compare high-win-rate presets against rejected ones to surface surprises.
+
+function injectStrays() {
+  // Count wins per preset across all categories and subjects
+  const winCounts = {}; // key → number of wins
+  for (const v of votes) {
+    winCounts[v.winnerKey] = (winCounts[v.winnerKey] || 0) + 1;
+  }
+
+  // Group presets by category
+  const groups = {};
+  for (const p of presets) {
+    (groups[p.subject] ||= []).push(p);
+  }
+
+  const injectedPairs = [];
+
+  for (const [cat, items] of Object.entries(groups)) {
+    const winners = items.filter(p => (winCounts[presetKey(p)] || 0) >= 2); // presets that won ≥ 2 times
+    const rejectList = items.filter(p => rejected.has(presetKey(p)));
+
+    for (const w of winners) {
+      for (const r of rejectList.slice(0, 3)) {
+        if (w.subject === r.subject && w.preset === r.preset) continue; // skip self-pairing
+        injectedPairs.push({ category: cat, a: w, b: r, _type: 'stray' });
+      }
+    }
+  }
+
+  shuffle(injectedPairs);
+  pairs.push(...injectedPairs);
+}
+
+// ── Results & export ────────────────────────────────────
+
+function showResults() {
+  document.getElementById('gamePage').classList.remove('active');
+  const rp = document.getElementById('resultsPage');
+  rp.classList.add('active');
+
+  const tbody = document.getElementById('voteBody');
+  let html = '';
+  for (let i = 0; i < votes.length; i++) {
+    const v = votes[i];
+    html += `<tr><td style="color:#555">${i+1}</td><td>${esc(v.category)}</td><td>${esc(v.winnerKey)}</td><td>${esc(v.loserKey)}</td></tr>`;
+  }
+  tbody.innerHTML = html;
+  document.getElementById('voteCount').textContent = `${votes.length} votes recorded`;
+}
+
+function exportVotes() {
+  const blob = new Blob([JSON.stringify({ exported_at: new Date().toISOString(), votes }, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `passenger_${Date.now()}.json`;
+  a.click(); URL.revokeObjectURL(url);
+}
+
+function backToGame() {
+  document.getElementById('resultsPage').classList.remove('active');
+  document.getElementById('gamePage').classList.add('active');
+  renderPair();
+}
+
+// ── Utilities ───────────────────────────────────────────
+
+function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } }
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function showToast(msg) {
+  const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+function resetAll() { if (!confirm('Reset everything?')) return; localStorage.removeItem('passenger_votes'); votes = []; location.reload(); }
+</script>
+</body>
+</html>
