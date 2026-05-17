@@ -99,6 +99,43 @@ The `flux-ultrarealistic-lora` workflow uses `UltraRealPhoto.safetensors` at str
 
 To add a LoRA to any workflow, insert a **LoraLoader** node between the UNET loader and KSampler.
 
+## ControlNet
+
+ControlNet lets you guide image generation with a reference image — preserving structure (edges, depth, pose) while changing style or content.
+
+**Models** are in `/mnt/storage/models/image/controlnet/`. Download with:
+
+```bash
+~/claude/manual_runs/download-flux-controlnet.sh
+```
+
+| File | Type | Size | Use |
+|---|---|---|---|
+| `flux-canny-controlnet-v3.safetensors` | Canny | ~1.5GB | Edge/structure guidance from a reference image |
+| `flux-depth-controlnet-v3.safetensors` | Depth | ~1.5GB | Depth map guidance for 3D structure |
+
+**VRAM note:** ControlNet adds ~1.5GB. To stay within 24GB, the `flux-controlnet-canny.json` workflow uses `flux1-dev-Q4_K.gguf` (6.5GB) instead of Q8_0 (12GB):
+
+```
+Q4_K (6.5GB) + T5 fp16 (9.4GB) + CLIP (0.2GB) + ControlNet (1.5GB) ≈ 18GB  ✓
+```
+
+**Workflow:** `flux-controlnet-canny.json`
+
+1. Load the workflow in ComfyUI
+2. Drag a reference image onto the **LoadImage** node
+3. `CannyEdgePreprocessor` (from comfyui_controlnet_aux) extracts edges
+4. `ControlNetApplyAdvanced` applies them to the conditioning at `strength=0.8`
+5. Edit the prompt in CLIPTextEncodeFlux nodes
+6. Queue — the output will follow the reference image's structure
+
+**Tuning ControlNet strength:**
+- `0.3–0.5` — loose guidance, more creative freedom
+- `0.6–0.8` — balanced structure + style
+- `0.9–1.0` — strict structure, less variation
+
+**Custom nodes required:** `Fannovel16/comfyui_controlnet_aux` (auto-installed by `start-flux.sh`)
+
 ## Comparing Results with Passenger
 
 [Passenger](../../passenger.html) is a tournament-mode comparison tool. It shows two images side-by-side and you pick the winner. The loser is eliminated. One image per subject survives.
@@ -155,7 +192,46 @@ The sidecar filename must match the image filename with `.json` replacing `.png`
 
 ## Batch Generation
 
-Batch runners generate multiple images for systematic comparison.
+Batch runners generate multiple images for systematic comparison. All batch scripts support `OLLAMA_MODEL=<model>` to switch the prompt expansion model:
+
+```bash
+# Use llama3.3:70b for better prompt expansion (if available on Ollama)
+OLLAMA_MODEL=llama3.3:70b python3 run-quality-comparison.py
+```
+
+### Quality Comparison
+
+5 subjects × 3 variants (base, UltraRealistic LoRA, Portrait Realism LoRA) = 15 images.
+
+```bash
+python3 run-quality-comparison.py
+python3 run-quality-comparison.py --output-dir /path/to/out
+```
+
+Output: `~/claude/comfyui/output/quality-comparison/`
+
+### LoRA Strength Sweep
+
+5 subjects × 4 strengths (0.0, 0.35, 0.6, 0.85) = 20 images. Tests a single LoRA at different strengths with strength 0.0 as the no-LoRA baseline.
+
+```bash
+python3 run-lora-strength-sweep.py
+python3 run-lora-strength-sweep.py --lora UltraRealPhoto.safetensors
+python3 run-lora-strength-sweep.py --output-dir /path/to/out
+```
+
+Output: `~/claude/comfyui/output/lora-strength-sweep/`
+
+### Aspect Ratio Test
+
+5 subjects × 2 resolutions (1024×1024 square, 832×1216 portrait) = 10 images. Tests whether portrait subjects look better at native 2:3 aspect.
+
+```bash
+python3 run-aspect-ratio-test.py
+python3 run-aspect-ratio-test.py --output-dir /path/to/out
+```
+
+Output: `~/claude/comfyui/output/aspect-ratio-test/`
 
 ### FLUX Tuning Batch
 
@@ -232,13 +308,55 @@ Scheduler: always `beta`. Sampler: `euler` (9/10 subjects). Steps: `20` for spee
     └── 4x_NMKD-Siax_200k.pth   # 64MB — 4x ESRGAN upscaler
 ```
 
+## Tournament Results
+
+Winners picked via Passenger (tournament-mode elimination). Each category compares all variants head-to-head until one remains.
+
+### Quality Comparison Round 1 — 2026-05-17 (llama3.1:8b prompts)
+
+5 subjects × 3 variants (base, UltraRealistic LoRA @ 0.85, Portrait Realism LoRA @ 0.85)
+
+| Subject | Winner | Notes |
+|---|---|---|
+| woman-portrait | base | LoRAs over-processed; base more natural |
+| man-portrait | base | |
+| food | base | |
+| night-street | portrait-realism | LoRA added mood/atmosphere |
+| interior | portrait-realism | LoRA helped scene depth |
+
+**Takeaway:** Base FLUX with tuned settings wins for isolated subjects (portraits, food). LoRA helps complex multi-element scenes.
+
+### Quality Comparison Round 2 — 2026-05-17 (mistral-nemo:12b prompts)
+
+Same 5 subjects × 3 variants. Switched prompt model to `mistral-nemo:12b` for better expansion quality.
+
+| Subject | Winner | Notes |
+|---|---|---|
+| woman-portrait | portrait-realism | Better expanded prompts surfaced LoRA benefit |
+| man-portrait | ultrareal | |
+| food | ultrareal | |
+| night-street | ultrareal | |
+| interior | base | LoRA post-processing hurts natural interior light |
+
+**Takeaway:** With better prompts, UltraReal LoRA is competitive (wins 3/5 vs 0/5 in Round 1). Interior scenes still favor base. The prompt model matters — `mistral-nemo:12b` unlocked quality that `llama3.1:8b` couldn't produce.
+
+### Prompt Model — Mac Mini M4
+
+Ollama runs on Mac Mini M4 (16GB unified memory):
+
+| Model | VRAM | Status |
+|---|---|---|
+| `llama3.1:8b` | ~4.7GB | Default baseline |
+| `mistral-nemo:12b` | ~7.2GB | **Current default** — better creative prose, ~1.2GB headroom |
+| `llama3.3:70b` | ~40GB | Does not fit |
+
 ## Architecture
 
 ```
 Mac Mini M4 (10.100.20.18)          Murderbot (10.100.20.19)
 ┌──────────────────────┐            ┌────────────────────────────┐
 │ Ollama               │            │ ComfyUI :8188              │
-│ llama3.1:8b          │◄───────────│ OllamaGenerateV2           │
+│ mistral-nemo:12b     │◄───────────│ OllamaGenerateV2           │
 │ Prompt expansion     │            │                            │
 └──────────────────────┘            │ FLUX.1-dev Q8_0 (12GB)    │
                                     │ T5 fp16 (9.4GB)            │

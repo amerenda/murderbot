@@ -25,7 +25,7 @@ from pathlib import Path
 
 COMFYUI        = "http://localhost:8188"
 OLLAMA_HOST    = "http://10.100.20.18:11434"
-OLLAMA_MODEL   = "llama3.1:8b"
+OLLAMA_MODEL   = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
 OUTPUT_DIR     = Path("/home/alex/claude/comfyui/output/tuning2")
 COMFYUI_OUTPUT = Path("/home/alex/claude/comfyui/output")
 

@@ -155,6 +155,8 @@ var contenders={};     // subject → array of preset objects still alive
 var eliminated=new Set();  // presetKey strings that have lost
 var currentPair=null;  // the pair currently on screen (for keyboard shortcuts)
 var votes=[];
+var roundQueue=[];     // shuffled category queue for current round
+var roundNum=0;        // current round number (for display)
 
 function presetKey(p){ return p.subject+'::'+p.preset; }
 
@@ -182,17 +184,29 @@ function countAlive(){
   var n=0; for(var s in contenders) if(contenders[s].length>0) n++; return n;
 }
 
-// Pick a random category with 2+ alive, then two random alive presets from it.
-// This shuffles categories and resets within each round so nothing is predictable.
+// Round-based pair picker: shuffle all viable categories into a queue, work
+// through them one at a time, then reshuffle for the next round. This ensures
+// every category is seen once before any is repeated, preventing fatigue from
+// back-to-back comparisons in the same category.
 function pickPair(){
   var viable=[];
   for(var s in contenders) if(contenders[s].length>=2) viable.push(s);
   if(viable.length===0) return null;
 
-  shuffle(viable);
-  // Pick a random category, then two random alive presets from it
-  var cat=viable[Math.floor(Math.random()*viable.length)];
-  var pool=contenders[cat];
+  // Drain any non-viable entries left in the queue from previous state
+  while(roundQueue.length>0 && !(contenders[roundQueue[roundQueue.length-1]] && contenders[roundQueue[roundQueue.length-1]].length>=2)){
+    roundQueue.pop();
+  }
+
+  // Refill queue when empty (start a new round)
+  if(roundQueue.length===0){
+    roundQueue=viable.slice();
+    shuffle(roundQueue);
+    roundNum++;
+  }
+
+  var cat=roundQueue.pop();
+  var pool=contenders[cat].slice();
   shuffle(pool);
   return {category:cat, a:pool[0], b:pool[1]};
 }
@@ -236,6 +250,7 @@ async function doInit(){
 
     loadVotes();
     initContenders();
+    roundQueue=[]; roundNum=0;
 
     // Restore eliminated presets from saved votes so we don't re-pick losers
     for(var vi=0;vi<votes.length;vi++) eliminated.add(votes[vi].loserKey);
@@ -480,7 +495,7 @@ function exportData(){
 }
 
 function confirmReset(){ if(!confirm('Delete all votes and start over?')) return; clearData(); }
-function clearData(){ localStorage.removeItem(KEY); votes=[]; eliminated=new Set(); rebuildContenders(); showToast('Cleared.'); }
+function clearData(){ localStorage.removeItem(KEY); votes=[]; eliminated=new Set(); roundQueue=[]; roundNum=0; rebuildContenders(); showToast('Cleared.'); }
 
 // ═══ Screens & UI helpers ═══
 function showScreen(n){ document.getElementById('landing').classList.toggle('hidden',n!=='landing'); document.getElementById('compare').classList.toggle('hidden',n!=='compare'); document.getElementById('results').classList.toggle('hidden',n!=='results'); }
@@ -502,7 +517,8 @@ function updateProgress(){
 
   var pct=maxElim>0?Math.min(100,(elimCount/maxElim)*100):0;
 
-  document.getElementById('progText').textContent=votes.length+' votes · '+totalAlive+'/'+presets.length+' remaining';
+  var roundLabel=roundNum>0?' · Round '+roundNum:'';
+  document.getElementById('progText').textContent=votes.length+' votes · '+totalAlive+'/'+presets.length+' remaining'+roundLabel;
   document.getElementById('globalFill').style.width=pct+'%';
   document.getElementById('globalText').textContent=Math.round(pct)+'% done ('+elimCount+'/'+maxElim+' eliminated)';
 

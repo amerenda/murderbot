@@ -123,6 +123,8 @@ install_if_missing "city96/ComfyUI-GGUF" main
 install_if_missing "stavsap/comfyui-ollama" v2
 # ComfyUI-Impact-Pack (ltdrdata) — FaceDetailer, SAM-based face enhancement
 install_if_missing "ltdrdata/ComfyUI-Impact-Pack" main
+# comfyui_controlnet_aux (Fannovel16) — canny, depth, pose preprocessors for ControlNet
+install_if_missing "Fannovel16/comfyui_controlnet_aux" main
 
 echo "[FLUX] Custom nodes ready."
 

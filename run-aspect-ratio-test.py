@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Quality comparison batch: same subjects × same seeds × 3 variants.
+Aspect ratio test: same subjects × same seeds × 2 resolutions.
 
-Compares base FLUX against UltraRealistic LoRA and Portrait Realism LoRA
-on 5 hand-picked subjects. Generates a 3-column HTML gallery.
+Tests whether portrait subjects look better at native portrait aspect (832×1216)
+vs square (1024×1024). All variants use euler/beta/20 steps/guidance 3.5 to
+isolate aspect ratio only.
 
 Usage:
-  python3 run-quality-comparison.py
-  python3 run-quality-comparison.py --output-dir /path/to/out
+  python3 run-aspect-ratio-test.py
+  python3 run-aspect-ratio-test.py --output-dir /path/to/out
+  OLLAMA_MODEL=llama3.3:70b python3 run-aspect-ratio-test.py
 """
 
 import argparse
@@ -24,7 +26,7 @@ from pathlib import Path
 COMFYUI        = "http://localhost:8188"
 OLLAMA_HOST    = "http://10.100.20.18:11434"
 OLLAMA_MODEL   = os.environ.get("OLLAMA_MODEL", "mistral-nemo:12b")
-OUTPUT_DIR     = Path("/home/alex/claude/comfyui/output/quality-comparison")
+OUTPUT_DIR     = Path("/home/alex/claude/comfyui/output/aspect-ratio-test")
 COMFYUI_OUTPUT = Path("/home/alex/claude/comfyui/output")
 
 FLUX_MODEL = "flux1-dev-Q8_0.gguf"
@@ -84,8 +86,7 @@ def _get_system(prompt):
             return _SYSTEMS[name]
     return _SYSTEMS["generic"]
 
-# ─── SUBJECTS (5) ────────────────────────────────────────────────────────────
-# Hand-picked for maximum LoRA visibility: portraits (skin/face), textures, mood lighting
+# ─── SUBJECTS ────────────────────────────────────────────────────────────────
 
 SUBJECTS = [
     {"id": "woman-portrait",  "seed": 1002, "prompt": "close-up portrait of a young woman, soft window light"},
@@ -95,43 +96,18 @@ SUBJECTS = [
     {"id": "interior",        "seed": 1007, "prompt": "cozy living room with fireplace and bookshelves, evening"},
 ]
 
-# ─── VARIANTS (3) ────────────────────────────────────────────────────────────
-# Each variant uses same seed per subject for a direct apples-to-apples comparison.
+# ─── ASPECT RATIO VARIANTS ───────────────────────────────────────────────────
+# Same sampler/scheduler/steps/guidance on all — isolates resolution only.
 
-VARIANTS = [
-    {
-        "id":       "base",
-        "note":     "Base FLUX Q8_0",
-        "steps":    20,
-        "guidance": 3.5,
-        "sampler":  "euler",
-        "scheduler":"beta",
-        "lora":     None,
-        "lora_strength": 0.0,
-    },
-    {
-        "id":       "ultrareal",
-        "note":     "UltraRealistic LoRA v2",
-        "steps":    35,
-        "guidance": 2.5,
-        "sampler":  "dpmpp_2m",
-        "scheduler":"beta",
-        "lora":     "UltraRealPhoto.safetensors",
-        "lora_strength": 0.85,
-    },
-    {
-        "id":       "portrait-realism",
-        "note":     "Portrait Realism LoRA",
-        "steps":    35,
-        "guidance": 2.5,
-        "sampler":  "dpmpp_2m",
-        "scheduler":"beta",
-        "lora":     "Flux_Portrait_Realism.safetensors",
-        "lora_strength": 0.85,
-    },
+RATIOS = [
+    {"id": "square",   "width": 1024, "height": 1024, "label": "1024×1024 (square)"},
+    {"id": "portrait", "width": 832,  "height": 1216, "label": "832×1216 (portrait 2:3)"},
 ]
 
-TOTAL = len(SUBJECTS) * len(VARIANTS)
+STEPS    = 20
+GUIDANCE = 3.5
+SAMPLER  = "euler"
+SCHEDULER = "beta"
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────────
 
@@ -145,39 +121,22 @@ def expand_prompt(base_prompt):
     resp.raise_for_status()
     return resp.json()["response"].strip()
 
-def build_comfy_prompt(base_prompt, expanded_prompt, variant, seed, save_prefix):
-    guidance  = variant["guidance"]
-    clip_src  = ["4", 0]
-    model_src = ["7", 0]
-
-    nodes = {
+def build_comfy_prompt(base_prompt, expanded_prompt, seed, width, height, save_prefix):
+    return {
         "4":  {"class_type": "DualCLIPLoaderGGUF",  "inputs": {"clip_name1": "clip_l.safetensors", "clip_name2": "t5xxl_fp16.safetensors", "type": "flux"}},
+        "5":  {"class_type": "CLIPTextEncodeFlux",   "inputs": {"clip": ["4", 0], "clip_l": base_prompt,  "t5xxl": expanded_prompt, "guidance": GUIDANCE}},
+        "6":  {"class_type": "CLIPTextEncodeFlux",   "inputs": {"clip": ["4", 0], "clip_l": "",           "t5xxl": "",              "guidance": GUIDANCE}},
         "7":  {"class_type": "UnetLoaderGGUF",       "inputs": {"unet_name": FLUX_MODEL}},
-        "8":  {"class_type": "EmptyLatentImage",     "inputs": {"width": 1024, "height": 1024, "batch_size": 1}},
+        "8":  {"class_type": "EmptyLatentImage",     "inputs": {"width": width, "height": height, "batch_size": 1}},
+        "9":  {"class_type": "KSampler",             "inputs": {
+            "model": ["7", 0], "positive": ["5", 0], "negative": ["6", 0], "latent_image": ["8", 0],
+            "seed": seed, "steps": STEPS, "cfg": 1.0,
+            "sampler_name": SAMPLER, "scheduler": SCHEDULER, "denoise": 1.0,
+        }},
         "10": {"class_type": "VAELoader",            "inputs": {"vae_name": "ae.safetensors"}},
         "11": {"class_type": "VAEDecode",            "inputs": {"samples": ["9", 0], "vae": ["10", 0]}},
         "12": {"class_type": "SaveImage",            "inputs": {"images": ["11", 0], "filename_prefix": save_prefix}},
     }
-
-    if variant["lora"]:
-        nodes["13"] = {"class_type": "LoraLoader", "inputs": {
-            "model":          ["7", 0],
-            "clip":           ["4", 0],
-            "lora_name":      variant["lora"],
-            "strength_model": variant["lora_strength"],
-            "strength_clip":  variant["lora_strength"],
-        }}
-        model_src = ["13", 0]
-        clip_src  = ["13", 1]
-
-    nodes["5"] = {"class_type": "CLIPTextEncodeFlux", "inputs": {"clip": clip_src, "clip_l": base_prompt,  "t5xxl": expanded_prompt, "guidance": guidance}}
-    nodes["6"] = {"class_type": "CLIPTextEncodeFlux", "inputs": {"clip": clip_src, "clip_l": "",           "t5xxl": "",              "guidance": guidance}}
-    nodes["9"] = {"class_type": "KSampler",           "inputs": {
-        "model": model_src, "positive": ["5", 0], "negative": ["6", 0], "latent_image": ["8", 0],
-        "seed": seed, "steps": variant["steps"], "cfg": 1.0,
-        "sampler_name": variant["sampler"], "scheduler": variant["scheduler"], "denoise": 1.0,
-    }}
-    return nodes
 
 def queue_prompt(prompt):
     r = requests.post(f"{COMFYUI}/prompt", json={"prompt": prompt}, timeout=30)
@@ -198,7 +157,7 @@ def wait_for_completion(prompt_id, timeout=600):
                 if status.get("status_str") == "error":
                     raise RuntimeError(f"ComfyUI error: {status.get('messages', [])}")
         time.sleep(4)
-    raise TimeoutError(f"Timed out after {timeout}s waiting for {prompt_id}")
+    raise TimeoutError(f"Timed out after {timeout}s")
 
 def get_output_image_path(history_entry):
     for node_outputs in history_entry.get("outputs", {}).values():
@@ -206,37 +165,33 @@ def get_output_image_path(history_entry):
             img = node_outputs["images"][0]
             sub = img.get("subfolder", "")
             return COMFYUI_OUTPUT / sub / img["filename"] if sub else COMFYUI_OUTPUT / img["filename"]
-    raise RuntimeError("No image output found in history")
+    raise RuntimeError("No image output found")
 
 # ─── HTML GALLERY ─────────────────────────────────────────────────────────────
 
 def generate_gallery(results):
-    variant_headers = "".join(
-        f'<th>'
-        f'<div class="vl">{v["id"]}</div>'
-        f'<div class="vd">{v["steps"]}st · {v["guidance"]}g · {v["sampler"]}<br>'
-        f'{"LoRA: " + v["lora"].replace(".safetensors","") + " @ " + str(v["lora_strength"]) if v["lora"] else "no LoRA"}'
-        f'</div></th>'
-        for v in VARIANTS
+    ratio_headers = "".join(
+        f'<th><div class="vl">{r["id"]}</div>'
+        f'<div class="vd">{r["label"]}<br>'
+        f'{STEPS}st · {GUIDANCE}g · {SAMPLER}/{SCHEDULER}</div></th>'
+        for r in RATIOS
     )
 
     rows = ""
     for subject in SUBJECTS:
         sid   = subject["id"]
         cells = ""
-        for variant in VARIANTS:
-            key = f"{sid}__{variant['id']}"
+        for ratio in RATIOS:
+            key = f"{sid}__{ratio['id']}"
             r   = results.get(key)
             if r and r.get("image_file") and Path(r["image_file"]).exists():
                 img_rel  = Path(r["image_file"]).name
                 gen_time = f"{r['generation_time_seconds']:.0f}s" if r.get("generation_time_seconds") else "?"
-                exp      = r.get("expanded_prompt", "")
-                exp_tip  = (exp[:300] + "…") if len(exp) > 300 else exp
                 cells += (
                     f'<td><div class="cell">'
                     f'<a href="{img_rel}" target="_blank">'
-                    f'<img src="{img_rel}" loading="lazy" title="{exp_tip}"></a>'
-                    f'<div class="cm">{gen_time}</div>'
+                    f'<img src="{img_rel}" loading="lazy"></a>'
+                    f'<div class="cm">{r["width"]}×{r["height"]} · {gen_time}</div>'
                     f'</div></td>'
                 )
             else:
@@ -249,18 +204,19 @@ def generate_gallery(results):
             f'{cells}</tr>'
         )
 
+    total = len(SUBJECTS) * len(RATIOS)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Quality Comparison — {datetime.now().strftime('%Y-%m-%d')}</title>
+<title>Aspect Ratio Test — {datetime.now().strftime('%Y-%m-%d')}</title>
 <style>
   body{{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:16px}}
   h1{{font-size:1.1rem;margin-bottom:2px}}
   p.meta{{color:#777;font-size:0.75rem;margin-bottom:12px}}
   table{{border-collapse:collapse;width:100%}}
   th,td{{border:1px solid #2a2a2a;padding:4px;vertical-align:top}}
-  th.sl{{text-align:left;font-size:0.7rem;width:130px;background:#1a1a1a;white-space:normal;line-height:1.4}}
+  th.sl{{text-align:left;font-size:0.7rem;width:130px;background:#1a1a1a;line-height:1.4}}
   th.sl small{{color:#888;font-weight:normal;display:block;margin-top:3px}}
   th{{background:#1a1a1a;font-size:0.7rem;text-align:center}}
   .vl{{font-size:0.95rem;font-weight:bold;margin-bottom:2px}}
@@ -272,27 +228,24 @@ def generate_gallery(results):
 </style>
 </head>
 <body>
-<h1>Quality Comparison — Base vs LoRAs</h1>
+<h1>Aspect Ratio Test — {STEPS}st {SAMPLER}/{SCHEDULER} g{GUIDANCE}</h1>
 <p class="meta">
   {datetime.now().strftime('%Y-%m-%d %H:%M')} &nbsp;·&nbsp;
-  {len([r for r in results.values() if r.get('image_file')])} / {TOTAL} images &nbsp;·&nbsp;
-  {len(SUBJECTS)} subjects · {len(VARIANTS)} variants · 1024×1024 · fixed seed per subject
+  {len([r for r in results.values() if r.get('image_file')])} / {total} images &nbsp;·&nbsp;
+  {len(SUBJECTS)} subjects · {len(RATIOS)} ratios · model: {OLLAMA_MODEL}
 </p>
 <table>
-  <thead><tr><th>Subject</th>{variant_headers}</tr></thead>
+  <thead><tr><th>Subject</th>{ratio_headers}</tr></thead>
   <tbody>{rows}</tbody>
 </table>
-<p style="margin-top:12px;font-size:0.65rem;color:#444">
-  Hover image for expanded prompt · Click to open full size · .json sidecar per image
-</p>
 </body>
 </html>"""
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Quality comparison: base FLUX vs LoRA variants")
-    p.add_argument("--output-dir", default=None, help="Override output directory")
+    p = argparse.ArgumentParser(description="Aspect ratio test: square vs portrait")
+    p.add_argument("--output-dir", default=None)
     return p.parse_args()
 
 
@@ -301,13 +254,14 @@ def main():
     outdir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR
     outdir.mkdir(parents=True, exist_ok=True)
 
+    total = len(SUBJECTS) * len(RATIOS)
+    done  = 0
     results = {}
-    done    = 0
 
-    print(f"Quality Comparison — {TOTAL} images ({len(SUBJECTS)} subjects × {len(VARIANTS)} variants)")
+    print(f"Aspect Ratio Test — {total} images ({len(SUBJECTS)} subjects × {len(RATIOS)} ratios)")
+    print(f"Model:  {OLLAMA_MODEL}")
     print(f"Output: {outdir}\n")
 
-    # Expand prompts once per subject (same expanded prompt used across all variants)
     print("Expanding prompts via Ollama...")
     expanded = {}
     for subject in SUBJECTS:
@@ -320,22 +274,21 @@ def main():
     print()
 
     for subject in SUBJECTS:
-        sid          = subject["id"]
-        seed         = subject["seed"]
-        base_prompt  = subject["prompt"]
-        exp_prompt   = expanded[sid]
+        sid         = subject["id"]
+        seed        = subject["seed"]
+        base_prompt = subject["prompt"]
+        exp_prompt  = expanded[sid]
 
-        for variant in VARIANTS:
-            vid = variant["id"]
-            key = f"{sid}__{vid}"
-            done += 1
-            prefix = f"qc__{sid}__{vid}"
+        for ratio in RATIOS:
+            key    = f"{sid}__{ratio['id']}"
+            done  += 1
+            prefix = f"art__{sid}__{ratio['id']}"
 
-            print(f"[{done}/{TOTAL}] {sid} / {vid}  (seed {seed})")
+            print(f"[{done}/{total}] {sid} / {ratio['label']}  (seed {seed})")
 
             try:
                 t0    = time.time()
-                nodes = build_comfy_prompt(base_prompt, exp_prompt, variant, seed, prefix)
+                nodes = build_comfy_prompt(base_prompt, exp_prompt, seed, ratio["width"], ratio["height"], prefix)
                 pid   = queue_prompt(nodes)
                 entry = wait_for_completion(pid)
                 gen   = time.time() - t0
@@ -345,49 +298,40 @@ def main():
                 shutil.copy2(src, dst)
 
                 results[key] = {
-                    "subject":                  sid,
-                    "preset":                   vid,   # passenger reads this field
-                    "variant":                  vid,
-                    "seed":                     seed,
-                    "expanded_prompt":          exp_prompt,
-                    "generation_time_seconds":  gen,
-                    "image_file":               str(dst),
-                    "steps":                    variant["steps"],
-                    "guidance":                 variant["guidance"],
-                    "sampler":                  variant["sampler"],
-                    "scheduler":                variant["scheduler"],
-                    "lora":                     variant.get("lora"),
-                    "lora_strength":            variant.get("lora_strength"),
+                    "subject":                 sid,
+                    "preset":                  ratio["id"],
+                    "width":                   ratio["width"],
+                    "height":                  ratio["height"],
+                    "seed":                    seed,
+                    "steps":                   STEPS,
+                    "guidance":                GUIDANCE,
+                    "sampler":                 SAMPLER,
+                    "scheduler":               SCHEDULER,
+                    "expanded_prompt":         exp_prompt,
+                    "generation_time_seconds": gen,
+                    "image_file":              str(dst),
                 }
 
-                sidecar = dst.with_suffix(".json")
-                sidecar.write_text(json.dumps(results[key], indent=2))
+                (dst.with_suffix(".json")).write_text(json.dumps(results[key], indent=2))
                 print(f"  → {src.name}  ({gen:.0f}s)")
 
             except Exception as e:
-                results[key] = {"subject": sid, "variant": vid, "error": str(e)}
+                results[key] = {"subject": sid, "preset": ratio["id"], "error": str(e)}
                 print(f"  ✗ ERROR: {e}")
 
-    # Write manifest.json (passenger-compatible format)
     ok_runs = [r for r in results.values() if r.get("image_file")]
-    manifest_path = outdir / "manifest.json"
-    manifest_path.write_text(json.dumps({
-        "runs":         ok_runs,
+    (outdir / "manifest.json").write_text(json.dumps({
+        "runs": ok_runs,
         "generated_at": datetime.now().isoformat(),
     }, indent=2))
 
-    # Write gallery
-    gallery_html = generate_gallery(results)
-    gallery_path = outdir / "index.html"
-    gallery_path.write_text(gallery_html)
+    (outdir / "index.html").write_text(generate_gallery(results))
 
     ok  = len(ok_runs)
-    err = len([r for r in results.values() if r.get("error")])
+    err = len(results) - ok
     print(f"\n{'─'*50}")
     print(f"Done: {ok} images  |  {err} errors")
-    print(f"Gallery:  {gallery_path}")
-    print(f"Manifest: {manifest_path}")
-    print(f"Compare:  ./run-passenger.sh {outdir}")
+    print(f"Compare: ./run-passenger.sh {outdir}")
 
 
 if __name__ == "__main__":
