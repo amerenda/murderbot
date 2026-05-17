@@ -99,6 +99,60 @@ The `flux-ultrarealistic-lora` workflow uses `UltraRealPhoto.safetensors` at str
 
 To add a LoRA to any workflow, insert a **LoraLoader** node between the UNET loader and KSampler.
 
+## Comparing Results with Passenger
+
+[Passenger](../../passenger.html) is a tournament-mode comparison tool. It shows two images side-by-side and you pick the winner. The loser is eliminated. One image per subject survives.
+
+```bash
+# Compare the default tuning batch output
+./run-passenger.sh
+
+# Compare a specific output directory
+./run-passenger.sh ~/claude/comfyui/output/quality-comparison
+./run-passenger.sh ~/claude/comfyui/output/tuning2
+```
+
+Open `http://localhost:8189` in a browser. Keyboard shortcuts: `1`/`←` left wins, `2`/`→` right wins, `Space` undo, `s` skip.
+
+### manifest.json format
+
+Every batch script must write a `manifest.json` to its output directory. Passenger won't start without it.
+
+```json
+{
+  "runs": [
+    {
+      "subject": "woman-portrait",
+      "preset":  "ultrareal",
+      "image_file": "/abs/path/to/qc__woman-portrait__ultrareal_00001_.png",
+      "steps": 35,
+      "guidance": 2.5,
+      "sampler": "dpmpp_2m"
+    }
+  ],
+  "generated_at": "2026-05-17T09:00:00"
+}
+```
+
+**Required fields per run:** `subject` (tournament category), `preset` (label shown in UI), `image_file` (absolute or relative path — basename is derived from it). Optional: `steps`, `guidance`, `sampler` (shown on hover).
+
+### Image + sidecar naming convention
+
+Batch scripts must follow this naming convention so Passenger can find the sidecar metadata:
+
+```
+{prefix}__{subject}__{preset}_00001_.png    ← image (ComfyUI adds counter)
+{prefix}__{subject}__{preset}_00001_.json   ← sidecar with steps/guidance/sampler
+```
+
+The sidecar filename must match the image filename with `.json` replacing `.png`. Passenger derives the sidecar path from `image_file` automatically.
+
+| Script | Prefix | Example filename |
+|---|---|---|
+| `run-tuning-batch.py` | none | `asian-woman__A__20steps__3.5guid__euler__beta__seed1002_00001_.png` |
+| `run-quality-comparison.py` | `qc__` | `qc__woman-portrait__ultrareal_00001_.png` |
+| `run-sdxl-batch.py` | `sdxl__` | `sdxl__portrait__preset-A_00001_.png` |
+
 ## Batch Generation
 
 Batch runners generate multiple images for systematic comparison.

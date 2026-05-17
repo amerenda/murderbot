@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Passenger — Image Comparison</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#080808;color:#ddd;min-height:100vh;display:flex;flex-direction:column}
+.hidden{display:none!important}
+
+button{padding:.5rem 1rem;border-radius:6px;cursor:pointer;font-size:.9rem;border:1px solid #333;background:#141414;color:#ccc;transition:border-color .15s,color .15s}
+button:hover{border-color:#4a8;color:#fff}
+button.primary{background:#267845;border-color:#35925d;color:#fff;font-weight:600}
+button.primary:hover{background:#32945a}
+
+/* Landing */
+#landing{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;gap:1.5rem;padding:2rem;text-align:center}
+#landing h1{font-size:2rem;color:#fff}
+.subtitle{color:#888;line-height:1.6;max-width:400px}
+
+.input-wrap{width:100%;max-width:400px;display:flex;flex-direction:column;gap:.35rem;font-size:.85rem;color:#aaa}
+.input-wrap label{font-size:.775rem;color:#999}
+.input-wrap input{padding:.6rem 1rem;border-radius:6px;background:#141414;color:#ddd;font-size:.95rem;border:1px solid #333;width:100%}
+
+.stat-card{background:#111;border:1px solid #252525;border-radius:6px;padding:.5rem 1rem;font-size:.825rem;color:#aaa;text-align:center;display:inline-block;margin:.3rem}
+.stat-card strong{color:#fff;display:block;font-size:1.05rem}
+
+/* Compare */
+#compare{flex:1;display:flex;flex-direction:column}
+.bar{display:flex;align-items:center;gap:1rem;padding:.65rem 1.25rem;background:#0d0d0d;border-bottom:1px solid #1e1e1e;flex-wrap:wrap}
+.cat-name{font-weight:700;color:#fff;font-size:1.05rem;min-width:80px}
+.prog-text{color:#777;font-size:.825rem}
+.bar-spacer{flex:1}
+
+.gen-prog{padding:.45rem 1.25rem;background:#0a0a0a;border-bottom:1px solid #161616;display:flex;align-items:center;gap:.75rem;font-size:.78rem;color:#666}
+.prog-track{flex:1;height:8px;background:#141414;border-radius:4px;overflow:hidden}
+.prog-fill{height:100%;border-radius:4px;transition:width .3s ease-in-out}
+.gen-fill{background:#2d7a5a}
+.cat-fill-ok{background:#2d7a5a}.cat-fill-warn{background:#b89e2a}.cat-fill-eliminated{background:#666}
+
+.compare-area{flex:1;display:flex;align-items:stretch;justify-content:center;padding:clamp(.75rem,2vh,1.5rem);gap:.65rem}
+.card{flex:1;max-width:48%;border-radius:10px;background:#101010;display:flex;align-items:center;justify-content:center;border:3px solid transparent;transition:border-color .15s}
+.card:hover{border-color:#2d8a5a}
+.card img{width:100%;height:auto;max-height:calc(100vh - 260px);object-fit:contain;border-radius:7px;display:block;border:none}
+.hint{position:absolute;bottom:.4rem;left:50%;transform:translateX(-50%);color:#3a3a3a;font-size:.68rem;background:rgba(10,10,10,.9);padding:.15rem .5rem;border-radius:4px}
+
+.skip-area{display:flex;justify-content:center;padding:.4rem;gap:.4rem}
+.skip-btn{background:none;border:none;color:#555;font-size:.825rem;cursor:pointer;padding:.3rem .7rem}
+.skip-btn:hover{color:#ccc;background:#1a1a1a;border-radius:4px}
+
+/* Toast */
+.toast-msg{position:fixed;bottom:2rem;left:50%;transform:translateX(-50%) translateY(130%);background:#b86e1d;color:#fff;padding:.6rem 1.3rem;border-radius:6px;font-size:.875rem;z-index:100;max-width:90vw;text-align:center;pointer-events:none;transition:transform .25s ease}
+.toast-msg.show{transform:translateX(-50%) translateY(0)}
+
+/* Results */
+#results{flex:1;display:flex;flex-direction:column;padding:1.5rem 2rem;gap:.75rem;overflow-y:auto}
+.results-header{text-align:center;margin-bottom:.25rem}
+.results-header h2{font-size:1.4rem;color:#fff}
+
+.tabs{display:flex;justify-content:center;gap:.35rem;border-bottom:1px solid #1e1e1e;padding-bottom:.45rem}
+.tab-btn{padding:.4rem 1rem;font-size:.825rem;background:none;border:none;color:#666;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-.55rem}
+.tab-btn.active{color:#fff;border-bottom-color:#3aa06a}
+
+.tab-content{display:none}.tab-content.active{display:block}
+.tab-content > div{width:min(780px,95%);margin:0 auto;padding:.25rem 0}
+
+.cat-block{margin-bottom:1.5rem;background:#0e0e0e;border:1px solid #1c1c1c;border-radius:8px;padding:.7rem .9rem}
+.cat-title{font-weight:600;color:#fff;font-size:.925rem;margin-bottom:.4rem;display:flex;justify-content:space-between}
+
+.rank-table{width:100%;border-collapse:collapse;font-size:.83rem}
+.rank-table th{color:#777;padding:.25rem .4rem;border-bottom:1px solid #222;font-weight:500;text-align:left;font-size:.765rem}
+.rank-table td{padding:.3rem .4rem;border-bottom:1px solid #141414;vertical-align:middle}
+
+.rank-badge{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:#222;color:#aaa;font-size:.68rem;font-weight:600;margin-right:.35rem}
+.rank-1 .rank-badge{background:#c89d00;color:#fff}
+.rank-2 .rank-badge{background:#888;color:#fff}
+.rank-3 .rank-badge{background:#a07040;color:#fff}
+
+.win-bar-bg{width:85px;height:5px;background:#1a1a1a;border-radius:3px;display:inline-block;vertical-align:middle;margin-left:.4rem}
+.win-bar-fill{height:100%;border-radius:3px;background:#3aa06a}
+
+.log-table{width:100%;border-collapse:collapse;font-size:.82rem}
+.log-table th,.log-table td{padding:.35rem .6rem;border-bottom:1px solid #222;text-align:left;font-size:.775rem;color:#777}
+.log-table td:not(:first-child):not(:nth-child(2)){color:#ddd}
+
+/* Loading */
+#loader{position:fixed;inset:0;background:rgba(8,8,8,.9);display:flex;align-items:center;justify-content:center;z-index:200;font-size:.95rem;color:#aaa;border-radius:6px}
+
+@media(max-width:768px){.card{max-width:100%}.compare-area{padding:.5rem;gap:.4rem}.bar{padding:.5rem .75rem}}
+</style>
+</head>
+<body>
+
+<!-- ═══ LANDING ═══ -->
+<div id="landing">
+  <h1>Passenger</h1>
+  <p class="subtitle">Tournament mode — pick the winner, loser is eliminated. One image remains per category.</p>
+  <div class="input-wrap">
+    <label for="dirUrl">Directory URL (leave blank = same location)</label>
+    <input type="text" id="dirUrl" value="" placeholder="(blank)">
+  </div>
+  <button class="primary" onclick="doInit()">Start</button>
+  <button style="font-size:.8rem;border-color:#331;color:#a64" onclick="clearData()">Clear saved data</button>
+  <span id="saveInfo"></span>
+  <div id="statusMsg" class="stat-card hidden"><strong id="statsText">Loading...</strong></div>
+</div>
+
+<!-- ═══ COMPARE ═══ -->
+<div id="compare" class="hidden">
+  <div class="bar">
+    <span class="cat-name" id="catName"></span>
+    <span class="prog-text" id="progText"></span>
+    <span class="bar-spacer"></span>
+    <button onclick="showResults()" style="font-size:.825rem;padding:.35rem .7rem">Standings</button>
+    <button onclick="exportData()" style="font-size:.825rem;padding:.35rem .7rem">Export</button>
+    <button onclick="confirmReset()" style="font-size:.825rem;padding:.35rem .7rem;border-color:#531;color:#a64">Reset</button>
+  </div>
+  <div class="gen-prog" id="globalProgress">
+    <span>Total</span>
+    <div class="prog-track"><div class="prog-fill gen-fill" id="globalFill" style="width:0%"></div></div>
+    <span id="globalText">—</span>
+  </div>
+  <div class="gen-prog cat-bars-wrap" id="catProgressWrap">
+    <!-- Per-category progress bars injected here -->
+    <div id="catProgress"><span style="color:#486;padding:.25rem">Starting...</span></div>
+  </div>
+  <div class="compare-area" id="area"></div>
+  <div class="skip-area">
+    <button onclick="doUndo()" style="font-size:.78rem;padding:.3rem .6rem;margin-right:.2rem">&#x21A9; Undo (Space)</button>
+    <span class="skip-btn" onclick="doSkip()">Skip &#x2192;</span>
+  </div>
+</div>
+
+<!-- ═══ RESULTS ═══ -->
+<div id="results" class="hidden">
+  <div class="results-header"><h2>Winners</h2><p style="color:#666;font-size:.85rem" id="resSub"></p></div>
+  <div id="t-winners"><div></div></div>
+  <div style="display:flex;justify-content:center;gap:.5rem;margin-top:.5rem">
+    <button onclick="exportData()" style="font-size:.825rem;padding:.35rem .7rem">Export JSON</button>
+    <button class="primary" onclick="backToCompare()" id="continueBtn" style="padding:.45rem 1.2rem;font-size:.825rem">Back to Compare</button>
+  </div>
+</div>
+
+<div class="toast-msg" id="toast"></div>
+<div id="loader" class="hidden">Loading...</div>
+
+<script>
+'use strict';
+
+// ═══ State ═══
+var KEY = 'passenger_votes';
+var presets=[];
+var contenders={};     // subject → array of preset objects still alive
+var eliminated=new Set();  // presetKey strings that have lost
+var currentPair=null;  // the pair currently on screen (for keyboard shortcuts)
+var votes=[];
+
+function presetKey(p){ return p.subject+'::'+p.preset; }
+
+// ═══ Tournament: contenders & elimination ═══
+function initContenders(){
+  contenders={}; eliminated=new Set();
+  for(var i=0;i<presets.length;i++){
+    var p=presets[i];
+    if(!contenders[p.subject]) contenders[p.subject]=[];
+    contenders[p.subject].push(p);
+  }
+}
+
+function rebuildContenders(){
+  for(var s in contenders){
+    var pool=[];
+    for(var i=0;i<contenders[s].length;i++){
+      if(!eliminated.has(presetKey(contenders[s][i]))) pool.push(contenders[s][i]);
+    }
+    contenders[s]=pool;
+  }
+}
+
+function countAlive(){
+  var n=0; for(var s in contenders) if(contenders[s].length>0) n++; return n;
+}
+
+// Pick a random category with 2+ alive, then two random alive presets from it.
+// This shuffles categories and resets within each round so nothing is predictable.
+function pickPair(){
+  var viable=[];
+  for(var s in contenders) if(contenders[s].length>=2) viable.push(s);
+  if(viable.length===0) return null;
+
+  shuffle(viable);
+  // Pick a random category, then two random alive presets from it
+  var cat=viable[Math.floor(Math.random()*viable.length)];
+  var pool=contenders[cat];
+  shuffle(pool);
+  return {category:cat, a:pool[0], b:pool[1]};
+}
+
+// ═══ Boot: check for saved data ═══
+(function(){
+  try{ var s=JSON.parse(localStorage.getItem(KEY)||'[]'); if(s.length>0) document.getElementById('saveInfo').innerHTML='<span class="stat-card"><strong>'+s.length+'</strong>Saved votes</span>'; }catch(e){}
+})();
+
+// ═══ Init ═══
+async function doInit(){
+  try{
+    showLoader(true);
+    var sm=document.getElementById('statusMsg'); sm.classList.remove('hidden'); setStatus('[1/5] Reading input...');
+
+    var manifestUrl=mkUrl('manifest.json');
+    setStatus('[2/5] Fetching manifest: '+manifestUrl);
+    var resp;
+    try{ resp=await fetch(manifestUrl,{cache:'no-store'}); }catch(e){ throw new Error('Failed to load manifest ('+e.name+'): '+(e.message||'')); }
+    if(!resp.ok) throw new Error('HTTP '+resp.status);
+
+    setStatus('[3/5] Parsing JSON...');
+    var raw=JSON.parse(await resp.text());
+    var runs;
+    if(typeof raw.runs==='string') runs=JSON.parse(raw.runs);
+    else if(Array.isArray(raw.runs)) runs=raw.runs;
+    else if(Array.isArray(raw)) runs=raw;
+    else throw new Error('Bad manifest: '+typeof raw.runs);
+    if(!runs||!runs.length) throw new Error('Manifest has no runs');
+
+    setStatus('[4/5] Extracting presets...');
+    presets=[];
+    for(var ri=0;ri<runs.length;ri++){
+      var r=runs[ri], subject=r.subject||'';
+      var fn=(r.image_file)?r.image_file.split('/').pop().replace(/\.png$/,''):subject+'__'+String(r.preset);
+      presets.push({subject:subject, preset:String(r.preset), fn:fn});
+    }
+    if(!presets.length) throw new Error('No presets extracted');
+
+    var cats=[]; for(var ci=0;ci<presets.length;ci++){ if(cats.indexOf(presets[ci].subject)===-1) cats.push(presets[ci].subject); }
+
+    loadVotes();
+    initContenders();
+
+    // Restore eliminated presets from saved votes so we don't re-pick losers
+    for(var vi=0;vi<votes.length;vi++) eliminated.add(votes[vi].loserKey);
+    rebuildContenders();
+
+    var aliveCount=countAlive(), totalCats=cats.length;
+    setStatus(presets.length+' presets, '+totalCats+' categories ('+aliveCount+' remaining)');
+    if(votes.length>0) document.getElementById('saveInfo').innerHTML='<span class="stat-card"><strong>'+votes.length+'</strong>Saved votes</span>';
+
+    stopLoading(); showScreen('compare'); renderPair();
+
+  }catch(e){
+    console.error('[ERROR]',e); stopLoading();
+    var sm=document.getElementById('statusMsg');
+    sm.classList.remove('hidden'); sm.innerHTML='<span style="color:#c44">Error: '+esc((e.message||String(e)).substring(0,200))+'</span>';
+  }
+}
+
+// ═══ URL helper ═══
+function mkUrl(p){ return window.location.protocol+'//'+window.location.host+'/'+p; }
+
+// ═══ Vote persistence ═══
+function loadVotes(){ try{ votes=JSON.parse(localStorage.getItem(KEY)||'[]'); }catch(e){ votes=[]; } }
+function saveVotes(){ localStorage.setItem(KEY,JSON.stringify(votes)); }
+
+// ═══ Render pair ═══
+function renderPair(){
+  var area=document.getElementById('area');
+
+  // Check if tournament is complete (only one alive per category)
+  var viable=0; for(var s in contenders) if(contenders[s].length>=2) viable++;
+  if(viable===0 && countAlive()<=1) return allDone();
+  if(viable===0){ // all categories have <=1 contender — tournament done or stuck
+    return allDone();
+  }
+
+  var pair=pickPair();
+  if(!pair){ showToast('No pairs to compare — check contenders.'); return; }
+  currentPair=pair;
+
+  // Shuffle side position (left/right)
+  var order=Math.random()<0.5?['a','b']:['b','a'];
+
+  document.getElementById('catName').textContent=pair.category;
+  updateProgress();
+
+  // Ensure persistent card containers
+  if(area.children.length<2){
+    area.innerHTML='';
+    var c1=document.createElement('div'); c1.className='card'; c1.id='side0'; area.appendChild(c1);
+    var c2=document.createElement('div'); c2.className='card'; c2.id='side1'; area.appendChild(c2);
+  }
+
+  for(var i=0;i<2;i++){
+    var item=pair[order[i]];
+    if(!item) continue;
+
+    var cardId=i===0?'side0':'side1';
+    var card=document.getElementById(cardId);
+    card.style.borderColor='transparent';
+
+    // Remove old content but not the container div — avoids DOM flicker
+    var oldImg=card.querySelector('img'); if(oldImg) oldImg.remove();
+    var oldHint=card.querySelector('.hint'); if(oldHint) oldHint.remove();
+
+    var newImg=document.createElement('img');
+    newImg.src=mkUrl(item.fn+'.png'); newImg.alt='';
+    // Start invisible for crossfade — no reveal of "new" download
+    newImg.style.opacity='0'; newImg.style.transition='opacity 0.25s ease-in-out';
+
+    loadMetaForImage(mkUrl(item.fn+'.json'),newImg);
+    card.appendChild(newImg);
+
+    var hint=document.createElement('span');
+    hint.className='hint';
+    if(i===0) hint.textContent='\u2190 '+item.preset+' (1)';
+    else hint.textContent=item.preset+' \u2192 (2)';
+    card.appendChild(hint);
+
+    // Crossfade: fade in after append so image swap is imperceptible
+    (function(imgEl){ requestAnimationFrame(function(){ setTimeout(function(){ imgEl.style.opacity='1'; },30+i*60); }); })(newImg);
+
+    var sideRef=i===0?order[0]:order[1];
+    card.addEventListener('click',function(p,s){ doVote(p,s); }.bind(null,pair,sideRef));
+  }
+}
+
+function loadMetaForImage(url,imgEl){
+  fetch(url).then(function(r){ return r.ok?r.json():null; }).catch(function(){ return null; })
+    .then(function(meta){ if(!meta) return; var t=[]; if(typeof meta.steps==='number') t.push(meta.steps+' steps'); if(typeof meta.guidance==='number') t.push('g'+meta.guidance); if(meta.sampler) t.push(meta.sampler); imgEl.title=t.join(', '); });
+}
+
+// ═══ Voting — winner stays, loser is eliminated ═══
+function doVote(pair, side){
+  var winner=pair[side];
+  var loser=(side==='a')?pair.b:pair.a;
+
+  votes.push({ts:Date.now(),category:pair.category,winnerKey:presetKey(winner),loserKey:presetKey(loser)});
+  saveVotes();
+
+  // Eliminate the loser so it won't be picked again
+  eliminated.add(presetKey(loser));
+
+  // Rebuild contender pools to remove eliminated presets — critical!
+  rebuildContenders();
+
+  currentPair=null;
+  renderPair();
+}
+
+function doUndo(){
+  if(!votes.length){ showToast('Nothing to undo'); return; }
+  var lastVote=votes.pop(); saveVotes();
+  // Reintroduce the loser so it can be picked again
+  eliminated.delete(lastVote.loserKey);
+  rebuildContenders(); currentPair=null;
+  renderPair(); showToast('Undone');
+}
+
+function doSkip(){
+  // Render a new random pair without voting
+  currentPair=null; renderPair();
+}
+
+// ═══ All done — one winner per category ═══
+function allDone(){
+  var html='<div style="text-align:center;color:#888;padding:3rem">';
+  html+='<h2 style="color:#fff;font-size:1.4rem;margin-bottom:.5rem">Tournament complete!</h2>';
+  html+='<p style="margin-bottom:.5rem">'+votes.length+' votes cast · '+countAlive()+' images remaining</p>';
+
+  // Show winners per category
+  html+='<div style="display:flex;justify-content:center;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem">';
+  for(var s in contenders){ if(contenders[s].length===1) html+='<span class="stat-card"><strong style="color:#3aa06a">'+esc(contenders[s][0].preset)+'</strong>'+esc(s)+'</span>'; }
+  html+='</div>';
+
+  html+='<div style="display:flex;justify-content:center;gap:.6rem">';
+  html+='<button class="primary" onclick="showResults()">See Results</button>';
+  html+='<button onclick="exportData()" style="padding:.45rem 1.2rem;border:1px solid #333;color:#ccc">Export</button>';
+  html+='</div></div>';
+  document.getElementById('area').innerHTML=html;
+}
+
+// ═══ Results & Leaderboard ═══
+function showResults(){
+  showScreen('results');
+  var catSet={}; for(var i=0;i<votes.length;i++) catSet[votes[i].category]=true;
+  document.getElementById('resSub').textContent=votes.length+' votes, '+Object.keys(catSet).length+' categories';
+  renderWinners();
+
+  // Show "Continue" only if there are more pairs to compare
+  var viable=0; for(var s in contenders) if(contenders[s].length>=2) viable++;
+  document.getElementById('continueBtn').style.display=viable?'':'none';
+}
+
+function switchTab(tabId,btnEl){
+  var te=document.querySelectorAll('.tab-content'); for(var i=0;i<te.length;i++) te[i].classList.remove('active');
+  var be=document.querySelectorAll('.tab-btn'); for(var j=0;j<be.length;j++) be[j].classList.remove('active');
+  var t=document.getElementById('t-'+tabId); if(t) t.classList.add('active');
+  if(btnEl) btnEl.classList.add('active');
+}
+
+function renderLeaderboard(){
+  // Count originals per subject from presets array (which has all of them)
+  var orig={}; for(var i=0;i<presets.length;i++){ if(!orig[presets[i].subject]) orig[presets[i].subject]=0; orig[presets[i].subject]++; }
+
+  // Group votes by category, compute win/loss per preset in that category
+  var cvm={}; for(var i=0;i<votes.length;i++){ var v=votes[i]; if(!cvm[v.category]) cvm[v.category]=[]; cvm[v.category].push(v); }
+
+  var html='';
+  Object.keys(cvm).sort().forEach(function(cat){
+    var vl=cvm[cat];
+    // Tournament progress for this category
+    var o=orig[cat]||0, a=(contenders[cat]?contenders[cat].length:0);
+    var elimTournament=o-a; var neededTournament=o-1;
+    var pctTournament=neededTournament>0?Math.round((elimTournament/neededTournament)*100):0;
+    var clsTournament=pctTournament===100?'cat-fill-eliminated':(pctTournament>=50?'cat-fill-ok':'cat-fill-warn');
+
+    var stats={};
+    for(var vi=0;vi<vl.length;vi++){
+      var v=vl[vi]; if(!stats[v.winnerKey]) stats[v.winnerKey]={wins:0,losses:0}; stats[v.winnerKey].wins++;
+      if(!stats[v.loserKey]) stats[v.loserKey]={wins:0,losses:0}; stats[v.loserKey].losses++;
+    }
+    // Ensure all presets in this category appear (even with zero votes)
+    for(var pi=0;pi<presets.length;pi++){ if(presets[pi].subject===cat){ var pk=presetKey(presets[pi]); if(!stats[pk]) stats[pk]={wins:0,losses:0}; } }
+
+    // Sort by win % desc, tiebreak: more comparisons first
+    Object.keys(stats).sort(function(a,b){
+      var tA=stats[a].wins+stats[a].losses, tB=stats[b].wins+stats[b].losses;
+      var pA=tA>0?stats[a].wins/tA:0, pB=tB>0?stats[b].wins/tB:0;
+      if(pB!==pA) return pB-pA; return tB-tA;
+    }).forEach(function(pKey,si){
+      var sd=stats[pKey], total=sd.wins+sd.losses;
+      var pct=(total>0)?Math.round((sd.wins/total)*100)+'%':'—';
+      var barW=vl.length>0?(total/vl.length*100):0;
+      html+='<div class="cat-block"><div class="cat-title"><span>'+esc(cat)+'</span><span style="color:#666;font-weight:400">'+vl.length+' votes · '+a+'/'+o+' alive</span></div>';
+      // Tournament progress bar
+      if(o>1){
+        html+='<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem"><span style="color:#777;font-size:.72rem;width:40px">'+elimTournament+' eliminated</span><div class="prog-track" style="flex:1;height:6px;border-radius:3px"><div class="prog-fill '+clsTournament+'" style="width:'+pctTournament+'%"></div></div><span style="color:#777;font-size:.72rem;width:35px;text-align:right">'+pctTournament+'%</span></div>';
+      }
+      html+='<table class="rank-table"><thead><tr><th>#</th><th>Preset</th><th style="text-align:right">W / L</th><th>Win %</th><th></th></tr></thead><tbody>';
+      html+='<tr class="'+(si<3?('rank-'+(si+1)): '')+'"><td><span class="rank-badge">'+(si+1)+'</span></td>';
+      html+='<td>'+esc(pKey.split('::')[1])+'</td>';
+      html+='<td style="text-align:right;color:#4c4">'+sd.wins+' / '+sd.losses+'</td>';
+      html+='<td>'+pct+'<span class="win-bar-bg"><span class="win-bar-fill" style="width:'+barW+'%"></span></span></td></tr>';
+      html+='</tbody></table></div>';
+    });
+  });
+
+  if(!html) html='<p style="color:#666;text-align:center;padding:3rem">No votes yet</p>';
+  document.querySelector('#t-leaderboard > div').innerHTML=html;
+}
+
+function renderVoteLog(){
+  var h='<table class="log-table"><thead><tr><th>#</th><th style="width:120px">Category</th><th style="text-align:right;color:#4c4">Winner</th><th>Loser &rarr;</th></tr></thead><tbody>';
+  for(var i=0;i<votes.length;i++){ var v=votes[i]; h+='<tr><td style="color:#555;text-align:right;width:2rem">'+(i+1)+'</td><td>'+esc(v.category)+'</td><td style="text-align:right;color:#4c4">'+presetStr(v.winnerKey)+'</td><td style="color:#b33">'+presetStr(v.loserKey)+'</td></tr>'; }
+  h+='</tbody></table>'; document.querySelector('#t-log > div').innerHTML=h;
+}
+
+function presetStr(k){ var p=k.split('::'); return p[0]+' '+p[1]; }
+
+// ═══ Export & Reset ═══
+function exportData(){
+  // Minimal: just category → winning preset filename + vote count
+  var result={ exported_at:new Date().toISOString() };
+
+  for(var s in contenders){
+    if(contenders[s].length>=1) {
+      result[s]=contenders[s][0].fn+'.png';
+    }
+  }
+
+  // Include total votes per category and grand total
+  var catCounts={};
+  for(var i=0;i<votes.length;i++) catCounts[votes[i].category]=(catCounts[votes[i].category]||0)+1;
+  result.total_votes=votes.length;
+  result.categories_per_vote=catCounts;
+
+  var blob=new Blob([JSON.stringify(result,null,2)],{type:'application/json'});
+  var url=URL.createObjectURL(blob); var a=document.createElement('a');
+  a.href=url; a.download='passenger_'+Date.now()+'.json'; document.body.appendChild(a);
+  a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); showToast('Exported!');
+}
+
+function confirmReset(){ if(!confirm('Delete all votes and start over?')) return; clearData(); }
+function clearData(){ localStorage.removeItem(KEY); votes=[]; eliminated=new Set(); rebuildContenders(); showToast('Cleared.'); }
+
+// ═══ Screens & UI helpers ═══
+function showScreen(n){ document.getElementById('landing').classList.toggle('hidden',n!=='landing'); document.getElementById('compare').classList.toggle('hidden',n!=='compare'); document.getElementById('results').classList.toggle('hidden',n!=='results'); }
+function setStatus(m){ document.getElementById('statsText').textContent=m; }
+function backToCompare(){ showScreen('compare'); currentPair=null; renderPair(); }
+
+// ═══ Progress tracking ═══
+function updateProgress(){
+  var totalAlive=countAlive();
+
+  // Count originals per subject from presets array (which has all of them)
+  var orig={}; for(var i=0;i<presets.length;i++){ if(!orig[presets[i].subject]) orig[presets[i].subject]=0; orig[presets[i].subject]++; }
+
+  // Total eliminations needed across all categories = sum of (N-1) where N is preset count
+  var maxElim=0; for(var s in orig) if(orig[s]>1) maxElim+=(orig[s]-1);
+
+  // Count actual eliminations: orig[s] - alive[s] per subject
+  var elimCount=0; for(var s in orig){ if(contenders[s]) elimCount+=(orig[s]-contenders[s].length); }
+
+  var pct=maxElim>0?Math.min(100,(elimCount/maxElim)*100):0;
+
+  document.getElementById('progText').textContent=votes.length+' votes · '+totalAlive+'/'+presets.length+' remaining';
+  document.getElementById('globalFill').style.width=pct+'%';
+  document.getElementById('globalText').textContent=Math.round(pct)+'% done ('+elimCount+'/'+maxElim+' eliminated)';
+
+  renderCategoryProgress();
+}
+
+function resetGlobalProgress(){
+  var cp=document.getElementById('catProgress'); if(cp) cp.innerHTML='';
+  document.getElementById('globalFill').style.width='0%';
+  document.getElementById('globalText').textContent='—';
+}
+
+function renderCategoryProgress(){
+  var orig={}; for(var i=0;i<presets.length;i++){ if(!orig[presets[i].subject]) orig[presets[i].subject]=0; orig[presets[i].subject]++; }
+
+  var html='';
+  Object.keys(orig).sort().forEach(function(s){
+    var o=orig[s]; var a=(contenders[s]?contenders[s].length:0);
+    if(a>=o) return;
+    var elim=o-a; var needed=o-1; var pct=needed>0?Math.round((elim/needed)*100):0;
+    var cls=pct===100?'cat-fill-eliminated':(pct>=50?'cat-fill-ok':'cat-fill-warn');
+    html+='<span class="stat-card" style="min-width:90px;font-size:.78rem"><strong style="color:#fff;font-size:.82rem">'+esc(s)+'</strong><br>'+a+'/'+o+' left ('+pct+'%)<div class="prog-track" style="height:4px;margin-top:.3rem;border-radius:2px"><div class="prog-fill '+cls+'" style="width:'+pct+'%"></div></div></span>';
+  });
+
+  var container=document.getElementById('catProgress');
+  if(container) {
+    if(html) container.innerHTML=html;
+    else if(votes.length===0) container.innerHTML='<span style="color:#486;padding:.25rem">Starting...</span>';
+  }
+}
+
+// ═══ Winners display ═══
+function renderWinners(){
+  // For each category with contenders, find the single survivor (or pick by wins if multiple alive)
+  var html='';
+  Object.keys(contenders).sort().forEach(function(cat){
+    var pool=contenders[cat];
+    if(!pool || !pool.length) return;
+
+    // Count stats from votes for display context
+    var wins=0, totalVotes=0;
+    for(var i=0;i<votes.length;i++){
+      if(votes[i].category!==cat) continue;
+      totalVotes++;
+      for(var j=0;j<pool.length;j++){
+        if(presetKey(pool[j])===votes[i].winnerKey){ wins++; break; }
+      }
+    }
+
+    // If exactly one left, that's the winner
+    var winner = pool[0];
+    html+='<div class="cat-block"><div class="cat-title"><span>'+esc(cat)+'</span><strong style="color:#3aa06a;font-size:1.1rem">'+esc(winner.preset)+'</strong></div>';
+    html+='<p style="color:#777;font-size:.825rem;margin-top:.2rem">Preset '+esc(winner.preset)+' won the tournament ('+totalVotes+' total votes in this category)</p>';
+    // Show full filename for reference
+    var fullPath=esc(winner.fn+'.png');
+    html+='<code style="display:block;color:#555;font-size:.78rem;margin-top:.3rem;word-break:break-all">'+fullPath+'</code></div>';
+  });
+
+  if(!html) html='<p style="color:#666;text-align:center;padding:3rem">No results yet</p>';
+  document.querySelector('#t-winners > div').innerHTML=html;
+}
+
+// ═══ Utilities ═══
+function shuffle(arr){ for(var si=arr.length-1;si>0;si--){ var sj=Math.floor(Math.random()*(si+1)); var tmp=arr[si]; arr[si]=arr[sj]; arr[sj]=tmp; } }
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function showToast(m){ var t=document.getElementById('toast'); t.textContent=m; setTimeout(function(){ t.classList.add('show'); },10); setTimeout(function(){ t.classList.remove('show'); },2500); }
+function showLoader(o){ document.getElementById('loader').classList.toggle('hidden',!o); }
+function stopLoading(){ showLoader(false); }
+
+// ═══ Keyboard shortcuts ═══
+document.addEventListener('keydown',function(e){
+  if(document.getElementById('compare').classList.contains('hidden')) return;
+  var pair=currentPair||pickPair(); // fall back to fresh pick if no current pair (shouldn't happen but guard)
+  if(!pair || document.getElementById('continueBtn').style.display==='none') return;
+
+  if(e.key==='1'||e.key==='ArrowLeft'){ doVote(pair,'a'); e.preventDefault(); }
+  else if(e.key==='2'||e.key==='ArrowRight'){ doVote(pair,'b'); e.preventDefault(); }
+  else if(e.key==='s'||e.key==='S'){ doSkip(); e.preventDefault(); }
+  else if(e.key===' '){ doUndo(); e.preventDefault(); }
+});
+
+</script>
+</body>
+</html>

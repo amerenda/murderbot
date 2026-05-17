@@ -300,6 +300,7 @@ def main():
 
                 results[key] = {
                     "subject":                  sid,
+                    "preset":                   vid,   # passenger reads this field
                     "variant":                  vid,
                     "seed":                     seed,
                     "expanded_prompt":          exp_prompt,
@@ -321,16 +322,26 @@ def main():
                 results[key] = {"subject": sid, "variant": vid, "error": str(e)}
                 print(f"  ✗ ERROR: {e}")
 
+    # Write manifest.json (passenger-compatible format)
+    ok_runs = [r for r in results.values() if r.get("image_file")]
+    manifest_path = outdir / "manifest.json"
+    manifest_path.write_text(json.dumps({
+        "runs":         ok_runs,
+        "generated_at": datetime.now().isoformat(),
+    }, indent=2))
+
     # Write gallery
     gallery_html = generate_gallery(results)
     gallery_path = outdir / "index.html"
     gallery_path.write_text(gallery_html)
 
-    ok  = len([r for r in results.values() if r.get("image_file")])
+    ok  = len(ok_runs)
     err = len([r for r in results.values() if r.get("error")])
     print(f"\n{'─'*50}")
     print(f"Done: {ok} images  |  {err} errors")
-    print(f"Gallery: {gallery_path}")
+    print(f"Gallery:  {gallery_path}")
+    print(f"Manifest: {manifest_path}")
+    print(f"Compare:  ./run-passenger.sh {outdir}")
 
 
 if __name__ == "__main__":
