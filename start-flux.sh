@@ -132,6 +132,8 @@ install_if_missing() {
 install_if_missing "city96/ComfyUI-GGUF" main
 # comfyui-ollama (stavsap) — remote Ollama nodes for prompt expansion via Mac Mini brain
 install_if_missing "stavsap/comfyui-ollama" v2
+# ComfyUI-Impact-Pack (ltdrdata) — FaceDetailer, SAM-based face enhancement
+install_if_missing "ltdrdata/ComfyUI-Impact-Pack" main
 
 echo "[FLUX] Custom nodes ready."
 
