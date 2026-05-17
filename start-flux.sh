@@ -1,21 +1,15 @@
 #!/bin/bash
 # Start ComfyUI with FLUX.1-dev GGUF for image generation on murderbot (RTX 4000 Blackwell)
-# Kills llama-server (:8088), installs custom nodes if missing, starts ComfyUI (:8188)
+# Always kills any running ComfyUI and llama-server before starting fresh.
 #
 # Brain: Mac Mini M4 (10.100.20.18) running Ollama (llama3.1:8b) for prompt expansion
 # Artist: Murderbot (10.100.20.19) running ComfyUI with FLUX GGUF on GPU
 #
 # Usage:
-#   ./start-flux.sh                          # start ComfyUI with FLUX
-#   ./start-flux.sh --restart                # restart with new params or models loaded
+#   ./start-flux.sh                          # (re)start ComfyUI with FLUX
 #   STEPS=30 FLUX_GUIDANCE_STRENGTH=4.0 ./start-flux.sh  # tune quality via env vars
 
 set -euo pipefail
-
-RESTART=false
-if [[ "${1:-}" == "--restart" ]]; then
-  RESTART=true
-fi
 
 # ─── ENV VARS (quality tuning) ──────────────────────────────────────────────
 FLUX_GUIDANCE_STRENGTH="${FLUX_GUIDANCE_STRENGTH:-3.5}"   # tuning winner: 3.5 (5/10 subjects)
@@ -87,14 +81,9 @@ if [ ! -f "$FLUX_MODEL" ]; then
   exit 1
 fi
 
-# Stop existing server — on restart kill both ComfyUI and llama-server
-# (both compete for the same GPU VRAM; only one can run at a time)
-if [ "$RESTART" = true ]; then
-  stop_llama_server   # ensure llama-server is stopped too
-  stop_comfyui
-else
-  stop_llama_server
-fi
+# Always stop both — they compete for the same GPU VRAM
+stop_llama_server
+stop_comfyui
 
 # ─── INSTALL CUSTOM NODES (first-run check) ────────────────────────────────
 CUSTOM_NODES_DIR="$COMFYUI_DIR/custom_nodes"
