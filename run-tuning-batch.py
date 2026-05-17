@@ -3,8 +3,16 @@
 FLUX quality tuning batch runner.
 Generates images across subjects × presets with full metadata sidecars
 and an HTML gallery for review.
+
+Usage:
+  python3 run-tuning-batch.py
+  python3 run-tuning-batch.py --model juggernaut-flux-Q4_K.gguf
+  python3 run-tuning-batch.py --lora flux-realism.safetensors --lora-strength 0.85
+  python3 run-tuning-batch.py --width 832 --height 1216    # portrait aspect ratio
+  python3 run-tuning-batch.py --model mymodel.gguf --lora mylora.safetensors --output-dir /path/to/out
 """
 
+import argparse
 import json
 import os
 import shutil
@@ -21,11 +29,15 @@ OLLAMA_MODEL   = "llama3.1:8b"
 OUTPUT_DIR     = Path("/home/alex/claude/comfyui/output/tuning2")
 COMFYUI_OUTPUT = Path("/home/alex/claude/comfyui/output")
 
+DEFAULT_FLUX_MODEL = "flux1-dev-Q4_K.gguf"
+
 OLLAMA_SYSTEM = (
-    "You are a prompt engineer for AI image generation. Take the user's simple "
-    "description and expand it into a rich, detailed visual prompt for a "
-    "photorealistic image generator. Add specific details about lighting, "
-    "atmosphere, textures, colors, depth of field, and composition. "
+    "You are a prompt engineer for photorealistic AI image generation. "
+    "Take the user's simple description and expand it into a rich, detailed visual prompt. "
+    "Include: specific lighting setup (golden hour, studio strobes, Rembrandt lighting, soft window light), "
+    "camera and lens metadata (e.g. 'shot on Sony A7R V, 85mm f/1.4, shallow depth of field'), "
+    "atmosphere, surface textures, colors, and composition. "
+    "Add post-processing style where natural (e.g. Lightroom color grade, subtle film grain, RAW finish). "
     "Reply ONLY with the enhanced prompt — no explanations, no preamble, no quotes."
 )
 
@@ -64,7 +76,12 @@ TOTAL = len(SUBJECTS) * len(PRESETS)
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────────
 
-def make_filename(subject_id, preset, seed):
+def make_filename(subject_id, preset, seed, model, lora):
+    model_tag = Path(model).stem
+    if model_tag == Path(DEFAULT_FLUX_MODEL).stem:
+        model_tag = ""
+    lora_tag = f"__{Path(lora).stem}" if lora else ""
+    model_prefix = f"__{model_tag}" if model_tag else ""
     return (
         f"{subject_id}"
         f"__{preset['id']}"
@@ -73,6 +90,8 @@ def make_filename(subject_id, preset, seed):
         f"__{preset['sampler']}"
         f"__{preset['scheduler']}"
         f"__seed{seed}"
+        f"{model_prefix}"
+        f"{lora_tag}"
     )
 
 def expand_prompt(base_prompt):
@@ -85,22 +104,41 @@ def expand_prompt(base_prompt):
     resp.raise_for_status()
     return resp.json()["response"].strip()
 
-def build_comfy_prompt(base_prompt, expanded_prompt, preset, seed, save_prefix):
+def build_comfy_prompt(base_prompt, expanded_prompt, preset, seed, save_prefix,
+                       model=DEFAULT_FLUX_MODEL, lora=None, lora_strength=0.8,
+                       width=1024, height=1024):
     guidance = preset["guidance"]
-    return {
+    # clip and model source nodes — remapped if LoRA is inserted
+    clip_src = ["4", 0]
+    model_src = ["7", 0]
+
+    nodes = {
         "4":  {"class_type": "DualCLIPLoaderGGUF",  "inputs": {"clip_name1": "clip_l.safetensors", "clip_name2": "t5xxl_fp8_e4m3fn.safetensors", "type": "flux"}},
-        "5":  {"class_type": "CLIPTextEncodeFlux",   "inputs": {"clip": ["4", 0], "clip_l": base_prompt,  "t5xxl": expanded_prompt, "guidance": guidance}},
-        "6":  {"class_type": "CLIPTextEncodeFlux",   "inputs": {"clip": ["4", 0], "clip_l": "",            "t5xxl": "",              "guidance": guidance}},
-        "7":  {"class_type": "UnetLoaderGGUF",       "inputs": {"unet_name": "flux1-dev-Q4_K.gguf"}},
-        "8":  {"class_type": "EmptyLatentImage",     "inputs": {"width": 1024, "height": 1024, "batch_size": 1}},
-        "9":  {"class_type": "KSampler",             "inputs": {
-                    "model": ["7", 0], "positive": ["5", 0], "negative": ["6", 0], "latent_image": ["8", 0],
-                    "seed": seed, "steps": preset["steps"], "cfg": 1.0,
-                    "sampler_name": preset["sampler"], "scheduler": preset["scheduler"], "denoise": 1.0}},
+        "7":  {"class_type": "UnetLoaderGGUF",       "inputs": {"unet_name": model}},
+        "8":  {"class_type": "EmptyLatentImage",     "inputs": {"width": width, "height": height, "batch_size": 1}},
         "10": {"class_type": "VAELoader",            "inputs": {"vae_name": "ae.safetensors"}},
         "11": {"class_type": "VAEDecode",            "inputs": {"samples": ["9", 0], "vae": ["10", 0]}},
         "12": {"class_type": "SaveImage",            "inputs": {"images": ["11", 0], "filename_prefix": save_prefix}},
     }
+
+    if lora:
+        nodes["13"] = {"class_type": "LoraLoader", "inputs": {
+            "model": ["7", 0], "clip": ["4", 0],
+            "lora_name": lora,
+            "strength_model": lora_strength,
+            "strength_clip": lora_strength,
+        }}
+        model_src = ["13", 0]
+        clip_src  = ["13", 1]
+
+    nodes["5"] = {"class_type": "CLIPTextEncodeFlux", "inputs": {"clip": clip_src, "clip_l": base_prompt,  "t5xxl": expanded_prompt, "guidance": guidance}}
+    nodes["6"] = {"class_type": "CLIPTextEncodeFlux", "inputs": {"clip": clip_src, "clip_l": "",            "t5xxl": "",              "guidance": guidance}}
+    nodes["9"] = {"class_type": "KSampler",           "inputs": {
+        "model": model_src, "positive": ["5", 0], "negative": ["6", 0], "latent_image": ["8", 0],
+        "seed": seed, "steps": preset["steps"], "cfg": 1.0,
+        "sampler_name": preset["sampler"], "scheduler": preset["scheduler"], "denoise": 1.0,
+    }}
+    return nodes
 
 def queue_prompt(prompt):
     r = requests.post(f"{COMFYUI}/prompt", json={"prompt": prompt}, timeout=30)
@@ -219,15 +257,38 @@ def generate_gallery(results):
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
+def parse_args():
+    p = argparse.ArgumentParser(description="FLUX quality tuning batch runner")
+    p.add_argument("--model",         default=DEFAULT_FLUX_MODEL,
+                   help=f"FLUX GGUF model filename in ComfyUI model paths (default: {DEFAULT_FLUX_MODEL})")
+    p.add_argument("--lora",          default=None,
+                   help="LoRA filename to apply (safetensors, in ComfyUI loras/ dir)")
+    p.add_argument("--lora-strength", type=float, default=0.8,
+                   help="LoRA strength applied to model and CLIP (default: 0.8)")
+    p.add_argument("--width",         type=int, default=1024, help="Image width (default: 1024)")
+    p.add_argument("--height",        type=int, default=1024, help="Image height (default: 1024)")
+    p.add_argument("--output-dir",    default=None,
+                   help="Override output directory (default: tuning2/)")
+    return p.parse_args()
+
+
 def main():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    args = parse_args()
+
+    out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     results    = {}
     job_num    = 0
     start_time = time.time()
 
+    model_label = args.model
+    lora_label  = f" + LoRA {args.lora} @ {args.lora_strength}" if args.lora else ""
+    res_label   = f"{args.width}×{args.height}"
+
     print(f"FLUX Tuning Batch — {TOTAL} images ({len(SUBJECTS)} subjects × {len(PRESETS)} presets)")
-    print(f"Output: {OUTPUT_DIR}")
+    print(f"Model:   {model_label}{lora_label}")
+    print(f"Output:  {out_dir}  |  Resolution: {res_label}")
     print(f"Started: {datetime.now().strftime('%H:%M:%S')}")
     print("=" * 65)
 
@@ -247,7 +308,7 @@ def main():
         for preset in PRESETS:
             job_num += 1
             pid     = preset["id"]
-            fname   = make_filename(sid, preset, seed)
+            fname   = make_filename(sid, preset, seed, args.model, args.lora)
             key     = f"{sid}__{pid}"
 
             # ETA
@@ -263,9 +324,14 @@ def main():
                 f"ETA {eta.strftime('%H:%M')}"
             )
 
-            # SaveImage prefix includes full descriptive name — visible in ComfyUI UI
-            save_prefix = f"tuning2/{fname}"
-            comfy_prompt = build_comfy_prompt(base_prompt, expanded, preset, seed, save_prefix)
+            subfolder = out_dir.name
+            save_prefix = f"{subfolder}/{fname}"
+            comfy_prompt = build_comfy_prompt(
+                base_prompt, expanded, preset, seed, save_prefix,
+                model=args.model, lora=args.lora,
+                lora_strength=args.lora_strength,
+                width=args.width, height=args.height,
+            )
 
             try:
                 t0        = time.time()
@@ -278,7 +344,7 @@ def main():
 
                 # Locate saved file and strip ComfyUI's _00001_ counter suffix
                 src = get_output_image_path(history)
-                dst = OUTPUT_DIR / f"{fname}.png"
+                dst = out_dir / f"{fname}.png"
                 shutil.move(str(src), str(dst))
 
                 meta = {
@@ -290,6 +356,11 @@ def main():
                     "sampler":                  preset["sampler"],
                     "scheduler":                preset["scheduler"],
                     "seed":                     seed,
+                    "model":                    args.model,
+                    "lora":                     args.lora,
+                    "lora_strength":            args.lora_strength if args.lora else None,
+                    "width":                    args.width,
+                    "height":                   args.height,
                     "base_prompt":              base_prompt,
                     "expanded_prompt":          expanded,
                     "generation_time_seconds":  round(gen_time, 1),
@@ -297,7 +368,7 @@ def main():
                     "image_file":               str(dst),
                     "generated_at":             datetime.now().isoformat(),
                 }
-                (OUTPUT_DIR / f"{fname}.json").write_text(json.dumps(meta, indent=2))
+                (out_dir / f"{fname}.json").write_text(json.dumps(meta, indent=2))
                 results[key] = meta
 
             except Exception as e:
@@ -307,15 +378,15 @@ def main():
     # ── Gallery + manifest ────────────────────────────────────────────────────
     print("\n" + "=" * 65)
     print("Generating gallery...")
-    (OUTPUT_DIR / "index.html").write_text(generate_gallery(results))
-    (OUTPUT_DIR / "manifest.json").write_text(
+    (out_dir / "index.html").write_text(generate_gallery(results))
+    (out_dir / "manifest.json").write_text(
         json.dumps({"runs": list(results.values()), "generated_at": datetime.now().isoformat()}, indent=2)
     )
 
     total_time = time.time() - start_time
     succeeded  = sum(1 for r in results.values() if "image_file" in r)
     print(f"Done! {succeeded}/{TOTAL} images in {total_time/60:.1f} min")
-    print(f"Gallery: {OUTPUT_DIR}/index.html")
+    print(f"Gallery: {out_dir}/index.html")
 
 if __name__ == "__main__":
     main()
