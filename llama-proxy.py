@@ -12,8 +12,12 @@ Solution: this proxy sits between opencode (port LISTEN_PORT) and llama-server
 (port UPSTREAM_PORT). When a /v1/chat/completions POST returns 400, it strips the
 oldest/largest messages and retries transparently, up to MAX_RETRIES times.
 
-With this proxy, opencode can use the full server context (131072 or 200K+) without
-artificial reduction. The proxy is the overflow safety net.
+Performance design:
+  - Happy path (no overflow): zero JSON parsing. Raw bytes forwarded directly.
+  - Overflow path: JSON parsed once on first 400, stripped in-place, re-serialized.
+  - Streaming: reads up to STREAM_CHUNK bytes; for SSE (small events) this returns
+    immediately with whatever is available — no buffering penalty.
+  - ThreadingHTTPServer: each connection gets its own thread, no head-of-line blocking.
 
 Usage: python3 llama-proxy.py [--upstream http://127.0.0.1:8088] [--port 8089]
        (also auto-started by start-opencode-stable.sh)
@@ -24,12 +28,14 @@ import sys
 import http.client
 import argparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DEFAULT_UPSTREAM = 'http://127.0.0.1:8088'
 DEFAULT_PORT     = 8089
 MAX_RETRIES      = 30     # strip rounds before giving up
-STREAM_CHUNK     = 512    # bytes per read on streaming responses (small = low latency)
+STREAM_CHUNK     = 4096   # bytes per read — SSE returns available data immediately,
+                          # so this doesn't buffer; just reduces syscall overhead vs 512
 
 
 def parse_args():
@@ -49,6 +55,8 @@ def _msg_size(msg):
     """Rough byte size of a message's content."""
     c = msg.get('content') or ''
     tc = msg.get('tool_calls') or []
+    if isinstance(c, str):
+        return len(c) + len(str(tc))
     return len(str(c)) + len(str(tc))
 
 
@@ -70,7 +78,6 @@ def strip_messages(messages, strip_n=2):
     while removed < strip_n:
         best_i  = -1
         best_sz = 0
-        # Find the largest tool message in the strippable window
         for i in range(1, len(messages) - protected_tail):
             if messages[i].get('role') == 'tool':
                 sz = _msg_size(messages[i])
@@ -81,7 +88,6 @@ def strip_messages(messages, strip_n=2):
         if best_i == -1:
             break  # no more tool messages
 
-        # Remove the tool message
         saved += best_sz
         messages.pop(best_i)
         removed += 1
@@ -110,7 +116,8 @@ def strip_messages(messages, strip_n=2):
 # ── Proxy handler ─────────────────────────────────────────────────────────────
 
 class ProxyHandler(BaseHTTPRequestHandler):
-    _quiet = False
+    _quiet    = False
+    _upstream = {'host': '127.0.0.1', 'port': 8088}
 
     def log_message(self, fmt, *args):
         pass  # silence BaseHTTPServer's default access log
@@ -141,50 +148,53 @@ class ProxyHandler(BaseHTTPRequestHandler):
             and 'application/json' in ct
         )
 
-        data = None
-        if is_chat:
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                is_chat = False
-
+        # ── Lazy parse: data stays None until we actually get a 400 ──────────
+        # Happy path forwards raw bytes with zero JSON overhead.
+        data      = None
         send_body = body
         attempt   = 0
 
+        # Pre-build the header dict once (same for all attempts)
+        hdrs = {k: v for k, v in self.headers.items()
+                if k.lower() not in ('host', 'connection', 'content-length')}
+        hdrs['Connection'] = 'close'
+
+        upstream = ProxyHandler._upstream
+        host     = upstream['host']
+        port     = upstream['port']
+
         while True:
-            if data is not None:
-                send_body = json.dumps(data).encode('utf-8')
-
-            # Build upstream request headers
-            hdrs = {k: v for k, v in self.headers.items()
-                    if k.lower() not in ('host', 'connection', 'content-length')}
-            hdrs['Connection']     = 'close'
             hdrs['Content-Length'] = str(len(send_body)) if send_body else '0'
-
-            # Parse upstream host/port from args
-            upstream = ProxyHandler._upstream
-            host = upstream['host']
-            port = upstream['port']
 
             conn = http.client.HTTPConnection(host, port, timeout=300)
             try:
                 conn.request(self.command, self.path, body=send_body, headers=hdrs)
                 resp = conn.getresponse()
 
-                # ── 400 overflow: strip + retry ───────────────────────────
+                # ── 400 overflow: parse (lazily), strip, retry ────────────
                 if resp.status == 400 and is_chat and attempt < MAX_RETRIES:
                     resp.read()
                     conn.close()
-                    msgs = data.get('messages', [])
-                    # Scale aggressiveness with history length:
-                    # short (<40 msgs) → strip 2, long (200+ msgs) → strip 10
+
+                    # First 400: parse the body for the first time
+                    if data is None:
+                        try:
+                            data = json.loads(body)
+                        except (json.JSONDecodeError, Exception):
+                            self._send_err(400, 'context overflow and request body is not valid JSON')
+                            return
+
+                    msgs    = data.get('messages', [])
                     strip_n = max(2, min(10, len(msgs) // 20))
                     n_stripped, n_bytes = strip_messages(msgs, strip_n=strip_n)
+
                     if n_stripped == 0:
                         self._log('400 — nothing left to strip, forwarding error')
                         self._send_err(400, 'context overflow: no strippable messages remain')
                         return
-                    attempt += 1
+
+                    attempt   += 1
+                    send_body  = json.dumps(data).encode('utf-8')
                     self._log(
                         f'400 overflow → stripped {n_stripped} msgs '
                         f'({n_bytes:,} bytes, retry {attempt}/{MAX_RETRIES}, '
@@ -202,7 +212,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         self.send_header(k, v)
                 self.end_headers()
 
-                # Stream body (small chunks for SSE latency)
                 while True:
                     chunk = resp.read(STREAM_CHUNK)
                     if not chunk:
@@ -214,7 +223,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 return
 
             except ConnectionRefusedError:
-                self._log(f'upstream {host}:{port} refused connection — is llama-server running?')
+                self._log(f'upstream {host}:{port} refused — is llama-server running?')
                 conn.close()
                 self._send_err(503, f'upstream {host}:{port} refused connection')
                 return
@@ -236,12 +245,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+# ── Threaded server ───────────────────────────────────────────────────────────
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """One thread per connection — no head-of-line blocking."""
+    daemon_threads = True
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
     args = parse_args()
 
-    # Parse upstream URL
     from urllib.parse import urlparse
     up = urlparse(args.upstream)
     ProxyHandler._upstream = {
@@ -250,7 +265,7 @@ def main():
     }
     ProxyHandler._quiet = args.quiet
 
-    server = HTTPServer(('127.0.0.1', args.port), ProxyHandler)
+    server = ThreadedHTTPServer(('127.0.0.1', args.port), ProxyHandler)
     print(
         f'[proxy] :{args.port} → {args.upstream}  '
         f'(overflow recovery: strip+retry up to {MAX_RETRIES}×)',
