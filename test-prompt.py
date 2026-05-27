@@ -7,14 +7,16 @@ Optionally compares multiple prompt strategies side by side.
 
 Usage:
   python3 test-prompt.py "close-up portrait of a young woman, soft window light"
-  python3 test-prompt.py --all        # test all 5 default subjects
-  python3 test-prompt.py --compare    # show generic vs routed vs dual-encode side by side
+  python3 test-prompt.py --all                      # test all 5 default subjects
+  python3 test-prompt.py --compare                  # show generic vs routed vs dual-encode side by side
+  python3 test-prompt.py --strategy nsfw "a woman"  # test the NSFW v2 system prompt
   OLLAMA_MODEL=mistral-nemo:12b python3 test-prompt.py "bowl of ramen"
 """
 
 import argparse
 import json
 import os
+import pathlib
 import sys
 import textwrap
 import requests
@@ -104,6 +106,9 @@ DUAL_ENCODE = (
     "start with the subject description directly."
 )
 
+_NSFW_PROMPT_FILE = pathlib.Path(__file__).parent / "nsfw-image-prompt-v2.txt"
+NSFW = _NSFW_PROMPT_FILE.read_text().strip() if _NSFW_PROMPT_FILE.exists() else GENERIC
+
 STRATEGIES = {
     "generic":      GENERIC,
     "portrait":     PORTRAIT,
@@ -111,6 +116,7 @@ STRATEGIES = {
     "street":       STREET,
     "interior":     INTERIOR,
     "dual-encode":  DUAL_ENCODE,
+    "nsfw":         NSFW,
 }
 
 # ─── ROUTING ─────────────────────────────────────────────────────────────────
