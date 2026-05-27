@@ -28,7 +28,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 # ── Config ────────────────────────────────────────────────────────────────────
 DEFAULT_UPSTREAM = 'http://127.0.0.1:8088'
 DEFAULT_PORT     = 8089
-MAX_RETRIES      = 10     # strip rounds before giving up
+MAX_RETRIES      = 30     # strip rounds before giving up
 STREAM_CHUNK     = 512    # bytes per read on streaming responses (small = low latency)
 
 
@@ -176,7 +176,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     resp.read()
                     conn.close()
                     msgs = data.get('messages', [])
-                    n_stripped, n_bytes = strip_messages(msgs, strip_n=2)
+                    # Scale aggressiveness with history length:
+                    # short (<40 msgs) → strip 2, long (200+ msgs) → strip 10
+                    strip_n = max(2, min(10, len(msgs) // 20))
+                    n_stripped, n_bytes = strip_messages(msgs, strip_n=strip_n)
                     if n_stripped == 0:
                         self._log('400 — nothing left to strip, forwarding error')
                         self._send_err(400, 'context overflow: no strippable messages remain')
