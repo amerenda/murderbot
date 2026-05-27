@@ -50,9 +50,9 @@
 #   NO_PROXY=true ./start-opencode-stable.sh               # skip proxy, point opencode directly at server
 #
 # VRAM context headroom (RTX 4000 Blackwell, 24 GB):
-#   CTX 131072 → 2.4 GB free   (current default)
+#   CTX 131072 → 2.4 GB free
 #   CTX 163840 → 1.9 GB free
-#   CTX 196608 → 1.4 GB free   ← recommended if you want more context
+#   CTX 196608 → 1.4 GB free   ← current default (dedicated single-workload GPU)
 #   CTX 229376 → 0.9 GB free   ← tight but usable
 #   CTX 262144 → 0.4 GB free   ← risky, not recommended
 
@@ -91,7 +91,7 @@ case "$MODEL_VARIANT" in
     MODEL_DISPLAY="Qwen3.6-35B (no-MTP, stable)"
     MTP_ENABLE=false
     NGL="${NGL:-40}"
-    CTX="${CTX:-131072}"
+    CTX="${CTX:-196608}"
     REPEAT_PENALTY=1.1
     ;;
   qwen36-mtp)
@@ -99,7 +99,7 @@ case "$MODEL_VARIANT" in
     MODEL_DISPLAY="Qwen3.6-35B MTP (fast)"
     MTP_ENABLE=true
     NGL="${NGL:-40}"
-    CTX="${CTX:-131072}"
+    CTX="${CTX:-196608}"
     REPEAT_PENALTY=1.1
     ;;
   qwen3-coder-next)
