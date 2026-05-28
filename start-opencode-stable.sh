@@ -50,11 +50,15 @@
 #   NO_PROXY=true ./start-opencode-stable.sh               # skip proxy, point opencode directly at server
 #
 # VRAM context headroom (RTX 4000 Blackwell, 24 GB):
-#   CTX 131072 → 2.4 GB free
-#   CTX 163840 → 1.9 GB free
-#   CTX 196608 → 1.4 GB free   ← current default (dedicated single-workload GPU)
-#   CTX 229376 → 0.9 GB free   ← tight but usable
-#   CTX 262144 → 0.4 GB free   ← risky, not recommended
+#   NOTE: observed actual free VRAM at CTX 196608 was only ~73 MB (table below is
+#   approximate; model/llama.cpp overhead may vary). NVENC needs ~500 MB for
+#   cuCtxCreate; Jellyfin GPU transcoding fails if <500 MB free.
+#   CTX 131072 → ~1.1 GB free  ← current default (Jellyfin NVENC coexistence)
+#   CTX 163840 → ~0.6 GB free  ← marginal for NVENC
+#   CTX 196608 → ~0.1 GB free  ← NVENC will fail (cuCtxCreate OOM)
+#   CTX 229376 → OOM risk
+#   CTX 262144 → OOM risk
+#   Override: CTX=196608 ./start-opencode-stable.sh  (when not running Jellyfin)
 
 set -euo pipefail
 
@@ -91,7 +95,7 @@ case "$MODEL_VARIANT" in
     MODEL_DISPLAY="Qwen3.6-35B (no-MTP, stable)"
     MTP_ENABLE=false
     NGL="${NGL:-40}"
-    CTX="${CTX:-196608}"
+    CTX="${CTX:-131072}"
     REPEAT_PENALTY=1.1
     ;;
   qwen36-mtp)
@@ -99,7 +103,7 @@ case "$MODEL_VARIANT" in
     MODEL_DISPLAY="Qwen3.6-35B MTP (fast)"
     MTP_ENABLE=true
     NGL="${NGL:-40}"
-    CTX="${CTX:-196608}"
+    CTX="${CTX:-131072}"
     REPEAT_PENALTY=1.1
     ;;
   qwen3-coder-next)
