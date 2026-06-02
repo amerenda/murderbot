@@ -24,7 +24,7 @@
 #
 #   3. OPENCODE_CTX = CTX (full server context, proxy is the safety net)
 #      opencode's token estimator (GPT cl100k_base) underestimates Qwen3 usage,
-#      BUT the proxy catches overflows before they crash. Compaction (reserved=40000)
+#      BUT the proxy catches overflows before they crash. Compaction (reserved=70000)
 #      fires early to keep context healthy; proxy is last resort.
 #
 # Models:
@@ -46,7 +46,7 @@
 #   CTX=65536 ./start-opencode-stable.sh                   # smaller context (saves VRAM)
 #   NGL=38 ./start-opencode-stable.sh                      # fewer GPU layers
 #   VERBOSE=true ./start-opencode-stable.sh                # verbose server logging
-#   OPENCODE_RESERVED=60000 ./start-opencode-stable.sh     # earlier compaction trigger
+#   OPENCODE_RESERVED=80000 ./start-opencode-stable.sh     # less aggressive compaction
 #   NO_PROXY=true ./start-opencode-stable.sh               # skip proxy, point opencode directly at server
 #
 # VRAM context headroom (RTX 4000 Blackwell, 24 GB):
@@ -127,12 +127,27 @@ esac
 #
 # OPENCODE_CTX      = full server CTX (proxy handles overflow)
 # OPENCODE_OUTPUT   = max tokens per response
-# OPENCODE_RESERVED = compaction trigger: fires at CTX - reserved estimated tokens
-#                     opencode's GPT tokenizer underestimates, so reserved=40000
-#                     ensures compaction fires well before the real limit.
+# OPENCODE_RESERVED = compaction trigger: fires at CTX - reserved actual tokens
+#
+# WHY reserved=100000 (threshold = 31072 tokens):
+#   The proxy strips messages transparently before requests reach the server.
+#   The server therefore reports back a "small" prompt_tokens (e.g. 40-70K
+#   after stripping). OpenCode uses this server-reported count to decide
+#   when to compact. With reserved=70000, threshold=61072 — close enough to
+#   the stripped context size that compaction never fires (server reports 50K,
+#   threshold is 61K, so opencode thinks context is fine).
+#
+#   With reserved=100000, threshold=31072. Any request that needed stripping
+#   reports 40K+ actual tokens from the server → exceeds threshold → compaction
+#   fires and summarises the session. After compaction, context drops to ~10K
+#   and the cycle resets cleanly. Without stripping (fresh session) the server
+#   reports <30K, no compaction.
+#
+#   NOTE: llama-server reports actual Qwen3 token counts (not GPT estimates),
+#   so the threshold comparison here is in real tokens, not tiktoken estimates.
 OPENCODE_CTX="${OPENCODE_CTX:-${CTX}}"
 OPENCODE_OUTPUT="${OPENCODE_OUTPUT:-8192}"
-OPENCODE_RESERVED="${OPENCODE_RESERVED:-40000}"
+OPENCODE_RESERVED="${OPENCODE_RESERVED:-85000}"
 
 # ─── PROXY CONFIG ─────────────────────────────────────────────────────────────
 PROXY_PORT=8089
@@ -170,17 +185,20 @@ CTK="q4_0"
 CTV="q4_0"
 BATCH="${BATCH:-512}"
 THREADS="${THREADS:-6}"
-HOST="127.0.0.1"
+HOST="0.0.0.0"
 PORT=8088
 PARALLEL=1
 VERBOSE="${VERBOSE:-false}"
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────────
+RESTART_SENTINEL="/tmp/llama-server-restarting"
+
 stop_server() {
   local PIDS
   PIDS=$(pgrep -f "llama-server" 2>/dev/null || true)
   if [ -n "$PIDS" ]; then
     echo "Stopping llama-server (PIDs: $PIDS)..."
+    touch "$RESTART_SENTINEL"
     echo "$PIDS" | xargs kill
     sleep 4
     if pgrep -f "llama-server" > /dev/null 2>&1; then
@@ -319,10 +337,15 @@ if ! pgrep -f "llama-server" > /dev/null 2>&1; then
 
   "$SERVER" "${SERVER_ARGS[@]}" >> "$BASE_LOG" 2>&1 &
   SERVER_PID=$!
+  disown "$SERVER_PID"  # survive terminal SIGHUP
 
-  # Crash watcher
+  # Crash watcher — suppressed if a restart sentinel is present (intentional kill)
   (
     while kill -0 "$SERVER_PID" 2>/dev/null; do sleep 5; done
+    if [ -f "$RESTART_SENTINEL" ]; then
+      rm -f "$RESTART_SENTINEL"
+      exit 0
+    fi
     echo "" >&2
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
     echo "ERROR: llama-server (PID $SERVER_PID) has died!" >&2
@@ -365,9 +388,11 @@ if [ "$NO_PROXY" != "true" ]; then
   else
     stop_proxy
     echo "Starting llama-proxy..."
+    MAX_TOOL_CHARS="${MAX_TOOL_CHARS:-2000}"
     python3 "$PROXY_SCRIPT" \
       --upstream "http://127.0.0.1:${PORT}" \
       --port "$PROXY_PORT" \
+      --max-tool-chars "$MAX_TOOL_CHARS" \
       >> "$PROXY_LOG" 2>&1 &
     PROXY_PID=$!
     sleep 0.5
@@ -388,7 +413,30 @@ OPENCODE_CONFIG_JSON=$(cat << OPENCODE_JSON
 {
   "\$schema": "https://opencode.ai/config.json",
   "model": "llamacpp/${MODEL_NAME}",
-  "permission": "allow",
+  "permission": {
+    "read": "allow",
+    "edit": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "bash": "allow",
+    "task": "allow",
+    "external_directory": "allow",
+    "todowrite": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
+    "repo_clone": "allow",
+    "repo_overview": "allow",
+    "lsp": "allow",
+    "doom_loop": "allow",
+    "skill": "allow",
+    "question": "deny"
+  },
+  "agent": {
+    "build": {
+      "prompt": "Proceed with tasks autonomously without stopping mid-task to ask for confirmation or check-ins. Never ask 'did you sync?', 'is it pushed?', 'should I continue?', or any similar check-in. If you said you will do something, do it immediately. Only stop if you are completely blocked and need information only the user can provide."
+    }
+  },
   "provider": {
     "llamacpp": {
       "npm": "@ai-sdk/openai-compatible",
