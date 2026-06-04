@@ -94,15 +94,15 @@ case "$MODEL_VARIANT" in
     MODEL="${MODELS_DIR}/qwen36/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
     MODEL_DISPLAY="Qwen3.6-35B (no-MTP, stable)"
     MTP_ENABLE=false
-    NGL="${NGL:-40}"
-    CTX="${CTX:-131072}"
+    NGL="${NGL:-41}"
+    CTX="${CTX:-32768}"
     REPEAT_PENALTY=1.1
     ;;
   qwen36-mtp)
     MODEL="${MODELS_DIR}/qwen36/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf"
     MODEL_DISPLAY="Qwen3.6-35B MTP (fast)"
     MTP_ENABLE=true
-    NGL="${NGL:-40}"
+    NGL="${NGL:-99}"
     CTX="${CTX:-131072}"
     REPEAT_PENALTY=1.1
     ;;
@@ -313,6 +313,7 @@ if ! pgrep -f "llama-server" > /dev/null 2>&1; then
 
   SERVER_ARGS=(
     -m      "$MODEL"
+    --device CUDA0
     -ngl    "$NGL"
     -fa     "$FA"
     -ctk    "$CTK"
