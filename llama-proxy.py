@@ -345,16 +345,14 @@ def strip_messages(messages, strip_n=2):
             to_remove.add(j)
         j += 1
 
-    # Pass 3: last resort — if nothing was stripped, remove the oldest message
-    # outside system prompt (even from protected tail). Better to lose recent context
-    # than to fail the request entirely.
+    # Pass 3: last resort — if nothing was stripped, remove oldest non-system message
+    # even from protected tail. Better to lose recent context than to fail entirely.
     if not to_remove and len(messages) > 2:
-        # Find oldest message after system prompt
         for i in range(1, len(messages)):
-            if messages[i].get('role') in ('user', 'assistant', 'tool'):
-                saved += _msg_size(messages[i])
-                to_remove.add(i)
-                break
+            # Skip only the system prompt; remove anything else
+            saved += _msg_size(messages[i])
+            to_remove.add(i)
+            break
 
     if not to_remove:
         return 0, 0
