@@ -21,7 +21,7 @@
 #        — Disables <think> blocks specifically during tool calls. Thinking
 #          is still available for non-tool responses (complex reasoning).
 #          This replaces the old --reasoning off (which disabled ALL thinking).
-#      max_tool_response_chars: 8000
+#      max_tool_response_chars: 3000
 #        — Truncates large tool responses at template render time. Replaces
 #          the proxy's --max-tool-chars behavior without a separate process.
 #          File reads that return 47KB+ are the main overflow offender.
@@ -331,8 +331,8 @@ if ! pgrep -f "llama-server" > /dev/null 2>&1; then
     --host  "$HOST"
     --port  "$PORT"
     --jinja
-    --chat-template-file "$SCRIPT_DIR/froggeric-chat-template.jinja"
-    --chat-template-kwargs '{"auto_disable_thinking_with_tools": true, "max_tool_response_chars": 8000, "preserve_thinking": false}'
+    --chat-template-file "$SCRIPT_DIR/froggeric-v20.jinja"
+    --chat-template-kwargs '{"auto_disable_thinking_with_tools": true, "max_tool_response_chars": 3000, "preserve_thinking": false}'
     --metrics
     --timeout       0
     --parallel      "$PARALLEL"
