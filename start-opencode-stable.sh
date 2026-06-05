@@ -160,7 +160,7 @@ OPENCODE_RESERVED="${OPENCODE_RESERVED:-85000}"
 PROXY_PORT=8089
 PROXY_LOG="/tmp/llama-proxy.log"
 NO_PROXY="${NO_PROXY:-true}"
-PROXY_SCRIPT="$SCRIPT_DIR/llama-proxy.py"
+PROXY_SCRIPT="$SCRIPT_DIR/proxy/llama-proxy.py"
 
 MODEL_NAME="$(basename "$MODEL")"
 
@@ -331,7 +331,7 @@ if ! pgrep -f "llama-server" > /dev/null 2>&1; then
     --host  "$HOST"
     --port  "$PORT"
     --jinja
-    --chat-template-file "$SCRIPT_DIR/froggeric-v20.jinja"
+    --chat-template-file "$SCRIPT_DIR/templates/froggeric-v20.jinja"
     --chat-template-kwargs '{"auto_disable_thinking_with_tools": true, "max_tool_response_chars": 3000, "preserve_thinking": false}'
     --metrics
     --timeout       0
