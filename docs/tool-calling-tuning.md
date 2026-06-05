@@ -56,7 +56,7 @@ Changes to apply and test one at a time, in order.
 ---
 
 ### 4. Qwen3 recommended sampling params
-**Status:** Pending  
+**Status:** Deployed 2026-06-05 — testing  
 **Planned change:** Add to `SERVER_ARGS` in `start-opencode-stable.sh`:
 ```
 --temp 0.6 --top-k 20 --top-p 0.95 --min-p 0.05
