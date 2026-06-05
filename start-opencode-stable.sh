@@ -2,7 +2,7 @@
 # start-opencode-stable.sh — Qwen3.6 + llama.cpp (native tool calling)
 #
 # Architecture:
-#   opencode → llama-server (port 8088)   [direct, no proxy by default]
+#   opencode → llama-proxy (port 8089) → llama-server (port 8088)
 #
 # Key flags:
 #
@@ -29,10 +29,12 @@
 #        — Strips past <think> blocks from conversation history. Prevents
 #          the "empty-think poison" and saves tokens across multi-turn sessions.
 #
-#   3. llama-proxy.py — DISABLED by default (NO_PROXY=true)
-#      max_tool_response_chars handles the main overflow cause. Re-enable with:
-#        NO_PROXY=false ./start-opencode-stable.sh
-#      for very long multi-file sessions where accumulated history overflows.
+#   3. llama-proxy.py — ENABLED by default (NO_PROXY=false)
+#      Intercepts HTTP 400 context overflows, strips+retries transparently.
+#      Also pre-truncates tool messages before they reach the server (backup
+#      to max_tool_response_chars, which truncates at Jinja render time).
+#      Exposes Prometheus metrics at :8089/metrics.
+#      Disable with: NO_PROXY=true ./start-opencode-stable.sh
 #
 # Models:
 #   qwen36        (default) — Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf    (~21GB, fully on GPU)
@@ -159,7 +161,7 @@ OPENCODE_RESERVED="${OPENCODE_RESERVED:-85000}"
 # ─── PROXY CONFIG ─────────────────────────────────────────────────────────────
 PROXY_PORT=8089
 PROXY_LOG="/tmp/llama-proxy.log"
-NO_PROXY="${NO_PROXY:-true}"
+NO_PROXY="${NO_PROXY:-false}"
 PROXY_SCRIPT="$SCRIPT_DIR/proxy/llama-proxy.py"
 
 MODEL_NAME="$(basename "$MODEL")"
@@ -193,7 +195,7 @@ CTV="q4_0"
 BATCH="${BATCH:-512}"
 THREADS="${THREADS:-6}"
 HOST="0.0.0.0"
-PORT="${PORT:-9110}"
+PORT="${PORT:-8088}"
 PARALLEL=1
 VERBOSE="${VERBOSE:-false}"
 
