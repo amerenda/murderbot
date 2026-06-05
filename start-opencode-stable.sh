@@ -1,31 +1,38 @@
 #!/bin/bash
-# start-opencode-stable.sh — Qwen3.6 + llama.cpp + overflow-recovery proxy
+# start-opencode-stable.sh — Qwen3.6 + llama.cpp (native tool calling)
 #
 # Architecture:
-#   opencode → llama-proxy (port 8089) → llama-server (port 8088)
-#
-#   llama-proxy.py (this dir) intercepts /v1/chat/completions requests. If
-#   llama-server returns 400 (prompt exceeds context window), the proxy strips
-#   the oldest/largest messages and retries transparently. This lets opencode
-#   use the full server context without crashing on overflows.
+#   opencode → llama-server (port 8088)   [direct, no proxy by default]
 #
 # Key flags:
 #
-#   1. --reasoning off                                         (CRITICAL)
-#      Disables Qwen3 thinking mode. Without this, the model generates reasoning
-#      text before the tool call and the parser fails on "text before <tool_call>".
-#      (Replaced deprecated --chat-template-kwargs '{"enable_thinking": false}'
-#      + --reasoning auto from earlier builds.)
+#   1. --chat-template-file froggeric-chat-template.jinja      (CRITICAL)
+#      Replaces the built-in GGUF template, which has multiple bugs in v20:
+#        - Minja replace bug: silently drops entire user message payloads
+#        - Empty-think poisoning: stacked <think></think> in history causes
+#          model to abort tool calls ~80% of the time
+#        - KV cache invalidation: spacing mismatch forces full re-prompt every turn
+#        - Minja AST nesting: ~80% throughput drop on llama.cpp from deep loops
+#      froggeric/Qwen-Fixed-Chat-Templates v20 (2026-06-05) fixes all of these.
+#      Template: https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates
 #
-#   2. llama-proxy.py on port 8089 (auto-started)
-#      Catches 400 context-overflow errors. Strips largest tool messages first
-#      (file reads are the biggest offenders), retries up to 10 times.
-#      No opencode changes needed. See llama-proxy.py for full details.
+#   2. --chat-template-kwargs (replaces --reasoning off)
+#      auto_disable_thinking_with_tools: true
+#        — Disables <think> blocks specifically during tool calls. Thinking
+#          is still available for non-tool responses (complex reasoning).
+#          This replaces the old --reasoning off (which disabled ALL thinking).
+#      max_tool_response_chars: 8000
+#        — Truncates large tool responses at template render time. Replaces
+#          the proxy's --max-tool-chars behavior without a separate process.
+#          File reads that return 47KB+ are the main overflow offender.
+#      preserve_thinking: false
+#        — Strips past <think> blocks from conversation history. Prevents
+#          the "empty-think poison" and saves tokens across multi-turn sessions.
 #
-#   3. OPENCODE_CTX = CTX (full server context, proxy is the safety net)
-#      opencode's token estimator (GPT cl100k_base) underestimates Qwen3 usage,
-#      BUT the proxy catches overflows before they crash. Compaction (reserved=70000)
-#      fires early to keep context healthy; proxy is last resort.
+#   3. llama-proxy.py — DISABLED by default (NO_PROXY=true)
+#      max_tool_response_chars handles the main overflow cause. Re-enable with:
+#        NO_PROXY=false ./start-opencode-stable.sh
+#      for very long multi-file sessions where accumulated history overflows.
 #
 # Models:
 #   qwen36        (default) — Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf    (~21GB, fully on GPU)
@@ -152,7 +159,7 @@ OPENCODE_RESERVED="${OPENCODE_RESERVED:-85000}"
 # ─── PROXY CONFIG ─────────────────────────────────────────────────────────────
 PROXY_PORT=8089
 PROXY_LOG="/tmp/llama-proxy.log"
-NO_PROXY="${NO_PROXY:-false}"
+NO_PROXY="${NO_PROXY:-true}"
 PROXY_SCRIPT="$SCRIPT_DIR/llama-proxy.py"
 
 MODEL_NAME="$(basename "$MODEL")"
@@ -296,7 +303,7 @@ if ! pgrep -f "llama-server" > /dev/null 2>&1; then
   echo "  Model:    $MODEL_NAME"
   echo "  Display:  $MODEL_DISPLAY"
   echo "  Template: GGUF embedded (Unsloth-patched, no override)"
-  echo "  Thinking: disabled (--reasoning off)"
+  echo "  Thinking: off during tool calls (auto_disable_thinking_with_tools)"
   if [ "$MTP_ENABLE" = true ]; then
     echo "  MTP:      enabled (--spec-type draft-mtp --spec-draft-n-max $MTP_N_MAX)"
   else
@@ -324,7 +331,8 @@ if ! pgrep -f "llama-server" > /dev/null 2>&1; then
     --host  "$HOST"
     --port  "$PORT"
     --jinja
-    --reasoning     off
+    --chat-template-file "$SCRIPT_DIR/froggeric-chat-template.jinja"
+    --chat-template-kwargs '{"auto_disable_thinking_with_tools": true, "max_tool_response_chars": 8000, "preserve_thinking": false}'
     --metrics
     --timeout       0
     --parallel      "$PARALLEL"
