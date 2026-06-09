@@ -302,66 +302,131 @@ def _msg_size(msg):
     return c_len + tc_len
 
 
+def _tool_group(messages, idx, limit):
+    """
+    Return the complete set of strippable indices for the tool-call group containing idx.
+
+    A group = one assistant message with tool_calls + all immediately following tool
+    messages. Removing a partial group leaves orphaned tool_call_ids in history, which
+    causes the model to stop issuing tool calls (it sees unanswered calls or stray results
+    with no corresponding call). Always strip the full group atomically.
+
+    All returned indices are within [1, limit). If idx falls outside that window, returns
+    an empty set so the caller can skip it.
+    """
+    role = messages[idx].get('role')
+
+    if role == 'assistant' and messages[idx].get('tool_calls'):
+        asst_idx = idx
+    elif role == 'tool':
+        # Walk back through sibling tool messages to find the owning assistant.
+        asst_idx = None
+        for i in range(idx - 1, 0, -1):
+            r = messages[i].get('role')
+            if r == 'assistant':
+                asst_idx = i
+                break
+            elif r == 'tool':
+                continue  # sibling result, keep scanning back
+            else:
+                break     # hit user/system — orphaned tool, just remove it alone
+    else:
+        # Plain user/assistant message with no tool_calls — no group.
+        return {idx} if 1 <= idx < limit else set()
+
+    group = set()
+    if asst_idx is not None and 1 <= asst_idx < limit:
+        group.add(asst_idx)
+        scan_start = asst_idx + 1
+    else:
+        # Orphaned tool (no assistant found or assistant is outside window).
+        scan_start = idx
+
+    # Collect all immediately following tool messages (the full result set for this call).
+    # If any tool result falls in the protected tail (i >= limit), we can't strip just
+    # the parent — orphaned tool_call_ids cause every retry to 400 as a format error.
+    tail_blocked = False
+    for i in range(scan_start, len(messages)):
+        if messages[i].get('role') == 'tool':
+            if i < limit:
+                group.add(i)
+            else:
+                tail_blocked = True  # result is in protected tail, can't strip parent
+        elif messages[i].get('role') != 'tool':
+            break
+
+    if tail_blocked:
+        return set()  # skip this group entirely; caller will try older ones
+
+    if 1 <= idx < limit:
+        group.add(idx)
+
+    return group if group else ({idx} if 1 <= idx < limit else set())
+
+
+def _add_group(messages, idx, limit, to_remove, saved_ref):
+    """Expand idx to its full tool-call group and add all members to to_remove."""
+    for gi in _tool_group(messages, idx, limit):
+        if gi not in to_remove:
+            saved_ref[0] += _msg_size(messages[gi])
+            to_remove.add(gi)
+
+
 def strip_messages(messages, strip_n=2):
     """
-    Remove strip_n messages from the strippable window (index 1 through len-5).
+    Remove strip_n *groups* from the strippable window (index 1 through len-5).
     Strategy:
-      1. Remove the LARGEST tool messages + their preceding assistant calls.
-      2. Fall back to oldest non-system messages if more stripping is needed.
+      1. Remove the LARGEST tool-call groups (assistant + all its tool results).
+      2. Fall back to oldest non-system messages (expanded to full groups).
+      3. Last resort: remove the oldest message even from the protected tail.
     Preserves: messages[0] (system) and the last 4 messages (current turn).
+
+    Groups are always removed atomically — partial removal orphans tool_call_ids and
+    causes the model to stop issuing tool calls on the next turn.
+
     Returns: (removed_count, bytes_saved)
     """
     protected_tail = 4
     limit = len(messages) - protected_tail  # strippable window: [1, limit)
-    saved = 0
+    saved_ref = [0]  # mutable so _add_group can accumulate into it
+    groups_removed = 0
 
-    # Pre-sort strippable tool messages by size (largest first) — one O(n log n) pass.
+    # Pass 1: largest tool messages → expand each to its full group.
+    # Stopping criterion is MESSAGE count (original ~5%/round rate), not group count.
+    # A group may push slightly past strip_n — that's fine; atomic removal beats orphans.
     tool_by_size = sorted(
         (i for i in range(1, limit) if messages[i].get('role') == 'tool'),
         key=lambda i: _msg_size(messages[i]),
         reverse=True,
     )
-
-    # Collect indices to remove: largest tools + their preceding assistant calls.
     to_remove = set()
     for i in tool_by_size:
+        if i in to_remove:
+            continue  # already absorbed into a previously selected group
         if len(to_remove) >= strip_n:
             break
-        saved += _msg_size(messages[i])
-        to_remove.add(i)
-        prev = i - 1
-        if (len(to_remove) < strip_n
-                and prev >= 1
-                and prev < limit
-                and messages[prev].get('role') == 'assistant'):
-            saved += _msg_size(messages[prev])
-            to_remove.add(prev)
+        _add_group(messages, i, limit, to_remove, saved_ref)
 
-    # Pass 2: oldest non-system messages if more stripping needed.
+    # Pass 2: oldest non-system messages → expand to full groups.
     j = 1
     while len(to_remove) < strip_n and j < limit:
         if j not in to_remove and messages[j].get('role') in ('user', 'assistant', 'tool'):
-            saved += _msg_size(messages[j])
-            to_remove.add(j)
+            _add_group(messages, j, limit, to_remove, saved_ref)
         j += 1
 
-    # Pass 3: last resort — if nothing was stripped, remove oldest non-system message
-    # even from protected tail. Better to lose recent context than to fail entirely.
+    # Pass 3: last resort — remove oldest non-system message even from protected tail.
     if not to_remove and len(messages) > 2:
         for i in range(1, len(messages)):
-            # Skip only the system prompt; remove anything else
-            saved += _msg_size(messages[i])
-            to_remove.add(i)
+            _add_group(messages, i, len(messages), to_remove, saved_ref)
             break
 
     if not to_remove:
         return 0, 0
 
-    # Pop in descending index order — no index drift.
     for i in sorted(to_remove, reverse=True):
         messages.pop(i)
 
-    return len(to_remove), saved
+    return len(to_remove), saved_ref[0]
 
 
 # ── Proxy handler ─────────────────────────────────────────────────────────────
@@ -416,20 +481,52 @@ class ProxyHandler(BaseHTTPRequestHandler):
         t0 = time.time()
         METRICS.inc_active()
 
-        # ── Pre-processing: truncate large tool messages ─────────────────────
+        # ── Pre-processing: truncate large tool messages + inject stream_options ─
         # Always applied before sending, not just on overflow. Tool results from
         # web searches / URL fetches can be 50-100KB each. With 100+ messages
         # accumulated, prompt eval hits 40-60s/request. Capping at MAX_TOOL_CHARS
         # keeps context small and prompt eval fast without losing useful info.
-        if is_chat and ProxyHandler._max_tool_chars > 0:
+        #
+        # Also injects stream_options.include_usage for streaming requests:
+        # without it, llama.cpp omits the usage field from SSE responses, so
+        # opencode falls back to tiktoken estimates (2-4x undercount for Qwen3's
+        # XML tool format) and compaction never fires.
+        if is_chat:
             try:
                 pre_data = json.loads(body)
-                n_trunc, saved = truncate_tool_messages(pre_data, ProxyHandler._max_tool_chars)
-                if n_trunc:
+                body_dirty = False
+
+                if ProxyHandler._max_tool_chars > 0:
+                    n_trunc, saved = truncate_tool_messages(pre_data, ProxyHandler._max_tool_chars)
+                    if n_trunc:
+                        body_dirty = True
+                        self._log(f'truncated {n_trunc} tool msgs ({saved:,} bytes saved)')
+                else:
+                    n_trunc = 0
+
+                if pre_data.get('stream'):
+                    opts = pre_data.setdefault('stream_options', {})
+                    if not opts.get('include_usage'):
+                        opts['include_usage'] = True
+                        body_dirty = True
+
+                if body_dirty:
                     body = json.dumps(pre_data).encode('utf-8')
-                    self._log(f'truncated {n_trunc} tool msgs ({saved:,} bytes saved)')
             except (json.JSONDecodeError, Exception):
                 pass  # malformed body — let it through, overflow handler will catch it
+
+        # ── Structural request logging (debug) ──────────────────────────────
+        if is_chat:
+            try:
+                _req = json.loads(body)
+                _msgs = _req.get('messages', [])
+                _roles = [m.get('role', '?')[0] for m in _msgs]  # s=system u=user a=assistant t=tool
+                _tail = ''.join(_roles[-6:]) if len(_roles) >= 6 else ''.join(_roles)
+                _has_tc = any(m.get('tool_calls') for m in _msgs)
+                _n_tools = len(_req.get('tools') or [])
+                self._log(f'req: {len(_msgs)} msgs [{_tail}] tools={_n_tools} has_tc={_has_tc}')
+            except Exception:
+                pass
 
         # ── Lazy parse: data stays None until we actually get a 400 ──────────
         # Happy path forwards raw bytes with zero JSON overhead (after truncation).
@@ -458,8 +555,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
                     # ── 400 overflow: parse (lazily), strip, retry ────────────
                     if resp.status == 400 and is_chat and attempt < MAX_RETRIES:
-                        resp.read()
+                        err_body = resp.read()
                         conn.close()
+                        if attempt == 0:
+                            try:
+                                err_json = json.loads(err_body)
+                                err_msg = (err_json.get('error') or {}).get('message') or err_body[:300].decode('utf-8', 'replace')
+                            except Exception:
+                                err_msg = err_body[:300].decode('utf-8', 'replace')
+                            self._log(f'400 error: {err_msg}')
 
                         # First 400: parse the body for the first time
                         if data is None:
@@ -497,6 +601,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         continue
 
                     # ── Forward response ──────────────────────────────────────
+                    is_streaming = 'text/event-stream' in (resp.getheader('Content-Type') or '')
                     try:
                         self.send_response(resp.status)
                         self.close_connection = True
@@ -507,12 +612,83 @@ class ProxyHandler(BaseHTTPRequestHandler):
                                 self.send_header(k, v)
                         self.end_headers()
 
-                        while True:
-                            chunk = resp.read(STREAM_CHUNK)
-                            if not chunk:
-                                break
-                            self.wfile.write(chunk)
+                        if is_chat and not is_streaming:
+                            # Non-streaming: buffer once to log finish_reason + tool call validity.
+                            resp_body = resp.read()
+                            self.wfile.write(resp_body)
                             self.wfile.flush()
+                            try:
+                                rd = json.loads(resp_body)
+                                ch = rd.get('choices', [{}])[0]
+                                fr = ch.get('finish_reason', '?')
+                                tc = (ch.get('message') or {}).get('tool_calls') or []
+                                bad_args = []
+                                for t in tc:
+                                    args = (t.get('function') or {}).get('arguments', '')
+                                    try:
+                                        json.loads(args)
+                                    except Exception:
+                                        bad_args.append((t.get('function', {}).get('name', '?'), repr(args[:80])))
+                                if bad_args:
+                                    self._log(f'resp: finish={fr} BAD_ARGS {bad_args}')
+                                else:
+                                    self._log(f'resp: finish={fr} tc={len(tc)}')
+                            except Exception:
+                                pass
+                        else:
+                            # Streaming or non-chat: forward chunks, peek at last data lines.
+                            # Track finish_reason and usage in separate variables — with
+                            # stream_options.include_usage the usage chunk arrives AFTER finish_reason.
+                            last_finish = b''
+                            last_usage  = b''
+                            while True:
+                                chunk = resp.read(STREAM_CHUNK)
+                                if not chunk:
+                                    break
+                                self.wfile.write(chunk)
+                                self.wfile.flush()
+                                if is_chat:
+                                    if b'"finish_reason"' in chunk:
+                                        last_finish = chunk
+                                    if b'"usage"' in chunk:
+                                        last_usage = chunk
+                            if is_chat and (last_finish or last_usage):
+                                try:
+                                    fr, tc, pt = '?', [], None
+                                    # Parse finish_reason
+                                    for src in (last_finish, last_usage):
+                                        if not src:
+                                            continue
+                                        for ln in reversed(src.split(b'\n')):
+                                            if ln.startswith(b'data:') and b'"finish_reason"' in ln:
+                                                rd = json.loads(ln[5:].strip())
+                                                ch = rd.get('choices', [{}])[0]
+                                                if ch.get('finish_reason') is not None:
+                                                    fr = ch['finish_reason']
+                                                    tc = (ch.get('delta') or {}).get('tool_calls') or []
+                                                break
+                                        if fr != '?':
+                                            break
+                                    # Parse prompt_tokens (prefer usage chunk if separate)
+                                    for src in (last_usage, last_finish):
+                                        if not src:
+                                            continue
+                                        for ln in reversed(src.split(b'\n')):
+                                            if ln.startswith(b'data:') and b'"usage"' in ln:
+                                                try:
+                                                    rd = json.loads(ln[5:].strip())
+                                                    pt = (rd.get('usage') or {}).get('prompt_tokens')
+                                                except Exception:
+                                                    pass
+                                                break
+                                        if pt is not None:
+                                            break
+                                    msg = f'resp(stream): finish={fr} tc={len(tc)}'
+                                    if pt is not None:
+                                        msg += f' prompt_tokens={pt}'
+                                    self._log(msg)
+                                except Exception:
+                                    pass
                     except (BrokenPipeError, ConnectionResetError):
                         # Client disconnected mid-response — normal cancellation, not an error.
                         pass

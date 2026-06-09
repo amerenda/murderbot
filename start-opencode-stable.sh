@@ -31,8 +31,9 @@
 #
 #   3. llama-proxy.py — ENABLED by default (NO_PROXY=false)
 #      Intercepts HTTP 400 context overflows, strips+retries transparently.
-#      Also pre-truncates tool messages before they reach the server (backup
-#      to max_tool_response_chars, which truncates at Jinja render time).
+#      Proxy truncation is DISABLED (MAX_TOOL_CHARS=0). The jinja template handles
+#      truncation at render time (max_tool_response_chars: 3000), which keeps raw
+#      messages unchanged so llama-server can reuse KV cache across turns.
 #      Exposes Prometheus metrics at :8089/metrics.
 #      Disable with: NO_PROXY=true ./start-opencode-stable.sh
 #
@@ -403,7 +404,7 @@ if [ "$NO_PROXY" != "true" ]; then
   else
     stop_proxy
     echo "Starting llama-proxy..."
-    MAX_TOOL_CHARS="${MAX_TOOL_CHARS:-2000}"
+    MAX_TOOL_CHARS="${MAX_TOOL_CHARS:-0}"
     python3 "$PROXY_SCRIPT" \
       --upstream "http://127.0.0.1:${PORT}" \
       --port "$PROXY_PORT" \
@@ -465,6 +466,7 @@ OPENCODE_CONFIG_JSON=$(cat << OPENCODE_JSON
           "name": "${MODEL_DISPLAY}",
           "limit": {
             "context": ${OPENCODE_CTX},
+            "input": ${OPENCODE_CTX},
             "output": ${OPENCODE_OUTPUT}
           }
         }
