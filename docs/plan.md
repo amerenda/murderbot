@@ -373,7 +373,84 @@ Each repo gets a `CLAUDE.md` that states the single workflow for that repo. An A
 
 ---
 
-##### 3. `app-factory/apps/agent-platform.toml` (Phase 0 end-to-end test)
+##### 3. GitHub Apps (one-time bootstrap)
+
+Two GitHub Apps give each actor a distinct identity in the GitHub UI — your commits, AI-generated commits, and AI reviews are all visually distinct without any convention enforcement.
+
+> **Cannot be created with OpenTofu.** The `integrations/github` provider has no `github_app` resource. Apps are created once in the GitHub UI; credentials are then stored in BWS and referenced as `generate = false` secrets.
+
+**`dean-coder`** — used by the coder agent to push commits and open PRs.
+- Commits show as: _"authored by Alex, committed by dean-coder[bot]"_ (or fully bot-authored if agent generates the code)
+- PRs opened by `dean-coder[bot]` are visually distinct from human-opened PRs
+- Required permissions: `Contents: Read/Write`, `Pull requests: Read/Write`, `Metadata: Read`
+- Install on: `amerenda` org
+
+**`dean-reviewer`** — used by the PR reviewer agent to post review comments.
+- Review submissions show as submitted by `dean-reviewer[bot]`
+- Required permissions: `Pull requests: Read/Write`, `Contents: Read`, `Metadata: Read`
+- Install on: `amerenda` org
+
+**Creation steps (one-time, human):**
+1. GitHub → Settings → Developer settings → GitHub Apps → New GitHub App
+2. Create each app with the permissions above; disable webhooks (the app makes outbound calls only)
+3. After creation: note the App ID; generate and download the private key PEM
+4. Store in BWS:
+   ```bash
+   bws secret create dean-coder-app-id       "<APP_ID>"
+   bws secret create dean-coder-private-key  "$(cat dean-coder.private-key.pem)"
+   bws secret create dean-reviewer-app-id    "<APP_ID>"
+   bws secret create dean-reviewer-private-key "$(cat dean-reviewer.private-key.pem)"
+   ```
+5. Install each app on the `amerenda` org: App page → Install App → `amerenda` → All repositories
+
+**In `agent-platform.toml`** (both referenced as pre-existing secrets):
+```toml
+[[secrets]]
+name = "CODER_APP_ID"
+bws_key = "dean-coder-app-id"
+generate = false
+
+[[secrets]]
+name = "CODER_APP_PRIVATE_KEY"
+bws_key = "dean-coder-private-key"
+generate = false
+
+[[secrets]]
+name = "REVIEWER_APP_ID"
+bws_key = "dean-reviewer-app-id"
+generate = false
+
+[[secrets]]
+name = "REVIEWER_APP_PRIVATE_KEY"
+bws_key = "dean-reviewer-private-key"
+generate = false
+```
+
+**Auth flow in agents** (same for both apps):
+```python
+import jwt, time, httpx
+
+def get_installation_token(app_id: str, private_key_pem: str) -> str:
+    now = int(time.time())
+    payload = {"iss": app_id, "iat": now - 60, "exp": now + 540}
+    jwt_token = jwt.encode(payload, private_key_pem, algorithm="RS256")
+    # Get installation ID for the org
+    inst = httpx.get(
+        "https://api.github.com/app/installations",
+        headers={"Authorization": f"Bearer {jwt_token}", "Accept": "application/vnd.github+json"}
+    ).json()[0]["id"]
+    # Exchange for short-lived installation token (valid 1 hour)
+    resp = httpx.post(
+        f"https://api.github.com/app/installations/{inst}/access_tokens",
+        headers={"Authorization": f"Bearer {jwt_token}", "Accept": "application/vnd.github+json"}
+    )
+    return resp.json()["token"]
+```
+For git push: `https://x-access-token:{token}@github.com/amerenda/{repo}.git`
+
+---
+
+##### 4. `app-factory/apps/agent-platform.toml` (Phase 0 end-to-end test)
 
 A real TOML spec for the `agent-platform` app (the platform being built in this plan). Running `make create-app APP=agent-platform` is the Phase 0 integration test — it proves the full toolchain works. The spec declares:
 - PostgreSQL database (prod + UAT)
@@ -750,7 +827,7 @@ Deploy: add `research-worker` component to `agent-platform.toml` → `provision_
 
 **Pre-conditions:**
 - Phases 1–4 complete
-- GitHub token with repo write access in Bitwarden, available as k3s Secret
+- `dean-coder` GitHub App created, installed on `amerenda` org, credentials in BWS (see Phase 0 bootstrap)
 
 **What gets built — `agent-platform/agents/coder/`:**
 - `agent.py` — PydanticAI agent with tools:
@@ -758,7 +835,10 @@ Deploy: add `research-worker` component to `agent-platform.toml` → `provision_
   - `read_file(path)`, `write_file(path, content)`, `run_shell(cmd)` (scoped to `SCRATCH_DIR` emptyDir mount)
   - `search_memory(query, agent_id)` → calls `common/memory_tools.py`, reads research context from `task-{id}` namespace if it exists
 - `worker.py` — Hatchet worker handling `agent:code` events
+- `common/github_app.py` — shared helper: `get_installation_token(app_id, private_key)` → short-lived token used for git push and GitHub API calls
 - Vikunja webhook adapter (Phase 5) already handles label 11 (`ai-go`) → no code change needed in adapter
+
+Commits and PRs opened by this worker appear as `dean-coder[bot]` in the GitHub UI — distinct from human-authored commits at a glance.
 
 **Coder worker TOML additions:**
 ```toml
@@ -775,8 +855,11 @@ read_only_root_filesystem = true   # writes go to SCRATCH_DIR emptyDir only
 name = "SCRATCH_DIR"
 value = "/scratch"
 [[components.env]]
-name = "GITHUB_TOKEN"
-secret_ref = { name = "github-credentials", key = "token" }
+name = "CODER_APP_ID"
+secret_ref = { bws_key = "dean-coder-app-id" }
+[[components.env]]
+name = "CODER_APP_PRIVATE_KEY"
+secret_ref = { bws_key = "dean-coder-private-key" }
 ```
 
 Sandbox is enforced at the pod level — `run_shell` is scoped to `$SCRATCH_DIR` in code, and `readOnlyRootFilesystem` prevents writes anywhere else. The pod cannot access other k8s Secrets (RBAC limited to its own namespace).
@@ -786,7 +869,7 @@ Deploy: add `coder-worker` component to `agent-platform.toml` → `provision_app
 **Ready conditions (all must pass):**
 1. Create Vikunja task "Add /healthz endpoint to ecdysis", label `ai-go`, repo `amerenda/ecdysis` in description
 2. Within 30 seconds: Hatchet UI shows `agent:code` run triggered (webhook-based, not polling)
-3. A draft PR exists on `amerenda/ecdysis` on a new branch
+3. A draft PR exists on `amerenda/ecdysis` on a new branch, opened by `dean-coder[bot]`
 4. PR description references the Vikunja task ID
 5. Vikunja task is marked done with the PR link as a comment
 6. Task with a broken/missing repo reference → agent fails gracefully with a Vikunja comment, no unhandled exception
@@ -800,7 +883,8 @@ Deploy: add `coder-worker` component to `agent-platform.toml` → `provision_app
 **Pre-conditions:**
 - Phases 1–4 complete
 - GitHub webhook can reach `agent-platform.amer.dev` (public ingress already set up)
-- `GITHUB_TOKEN` (with `admin:org_hook` scope) available in BWS for Tofu to register the org webhook
+- `dean-reviewer` GitHub App created, installed on `amerenda` org, credentials in BWS (see Phase 0 bootstrap)
+- A PAT or GitHub App token with `admin:org_hook` scope available in BWS for Tofu to register the org webhook (can reuse `dean-reviewer` app if it has org hook permissions, or a separate deploy token)
 
 **What gets built:**
 
@@ -815,12 +899,24 @@ secret_bws_key = "github-webhook-secret"   # generate=true; Tofu creates and sto
 Tofu calls `POST /orgs/{org}/hooks` (GitHub Webhooks API). Running `provision_app` again is idempotent — it upserts the registration.
 
 PR Reviewer — `agent-platform/agents/pr_reviewer/`:
-- `agent.py` — PydanticAI agent: reads PR diff via GitHub API, posts structured review comment
-- `worker.py` — Hatchet worker handling `github:pr_opened` events
+- `agent.py` — PydanticAI agent: reads PR diff via GitHub API using `dean-reviewer` app token, posts structured review comment
+- `worker.py` — Hatchet worker handling `github:pr_opened` events; reads `REVIEWER_APP_ID` + `REVIEWER_APP_PRIVATE_KEY` from env, calls `common/github_app.py` to get an installation token
 - Webhook adapter at `agent-platform/webhooks/github.py` (same FastAPI app as Vikunja adapter):
   - Validates `X-Hub-Signature-256` HMAC-SHA256 against `GITHUB_WEBHOOK_SECRET` (stored in BWS)
   - On `pull_request.opened`: pushes `github:pr_opened` Hatchet event with `{repo, pr_number, pr_url, diff_url, author}`
   - Returns 401 on invalid signature, 200 on success — GitHub retries on non-2xx
+
+Reviews submitted by this worker appear as `dean-reviewer[bot]` — distinct from human reviews and from `dean-coder[bot]` commits.
+
+Add reviewer app credentials to TOML:
+```toml
+[[components.env]]
+name = "REVIEWER_APP_ID"
+secret_ref = { bws_key = "dean-reviewer-app-id" }
+[[components.env]]
+name = "REVIEWER_APP_PRIVATE_KEY"
+secret_ref = { bws_key = "dean-reviewer-private-key" }
+```
 
 QA — `agent-platform/agents/qa/`:
 - `agent.py` — PydanticAI agent: tests staging URL using `playwright` Python library (HTTP + UI flows, not just curl)
@@ -845,7 +941,7 @@ Deploy: add `pr-reviewer-worker` and `qa-worker` components to `agent-platform.t
 1. `provision_app("agent-platform")` registers GitHub org webhook — `gh api /orgs/amerenda/hooks` shows it; no manual GitHub UI step
 2. Send a spoofed webhook (wrong HMAC) to `agent-platform.amer.dev/webhooks/github` → returns 401, no Hatchet run created
 3. Open a PR on any `amerenda` repo → Hatchet UI shows `github:pr_opened` run within 60 seconds
-4. PR receives a review comment from the agent within 5 minutes of opening
+4. PR receives a review comment from `dean-reviewer[bot]` within 5 minutes of opening
 5. Manually push `deploy:staging` event with valid payload → QA run appears and completes
 6. QA result (pass/fail + details) is posted as a PR comment or Vikunja comment
 7. PR Reviewer handles a deleted PR mid-run gracefully (no unhandled exception)
