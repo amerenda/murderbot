@@ -605,7 +605,7 @@ router_settings:
 
 **Why `least-busy`:** LLM requests vary wildly in length. Round-robin sends every Nth request to each backend regardless of how long it'll take; `least-busy` tracks active request count per backend and always sends the next request to the one doing the least work. For 3+ heterogeneous GPU runners, this is almost always the right choice.
 
-**Request queuing:** LiteLLM queues requests internally when all backends are saturated (configurable with `redis` for multi-replica LiteLLM deployments; single replica uses in-memory queue). Clients experience back-pressure as latency, not errors, until a backend becomes free.
+**Request queuing:** LiteLLM itself does not queue at the proxy level (OSS version). Queuing happens at the backend: llama-server has a slot system (`--slots N`) and holds excess requests internally until a slot frees. With 3 runners each configured with `--slots 4`, you get 12 concurrent requests before anyone waits — the runners absorb the back-pressure, clients see latency not errors. LiteLLM's `num_retries` is for backend failure retry, not saturation queuing.
 
 **Adding a new runner:** Add a new `model_list` entry pointing to the new runner's endpoint. Update the ConfigMap, push to gitops. ArgoCD syncs and LiteLLM hot-reloads the config — no pod restart required.
 
