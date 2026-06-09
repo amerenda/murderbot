@@ -393,12 +393,15 @@ This is also the first app that will be populated in Phases 1–8.
 
 **End-to-end stateless path (via MCP):**
 4. `scaffold_app("agent-platform", "stateless agent platform backend", "stateless")` creates a valid `app-factory/apps/agent-platform.toml`
-5. `provision_app("agent-platform")` completes: secrets in BWS, `agent_platform` + `agent_platform_uat` databases in PostgreSQL, manifests in `k3s-dean-gitops/apps/agent-platform/`
+5. `provision_app("agent-platform")` completes; verify explicitly:
+   - `bws secret list | grep agent-platform` — generated secrets exist in BWS (DB password, app secret, etc.)
+   - `psql -h 10.100.20.18 -U postgres -c "\l"` — shows `agent_platform` and `agent_platform_uat` databases
+   - `k3s-dean-gitops/apps/agent-platform/generated/` directory exists with valid manifests
 6. `open_deploy_pr("agent-platform", "phase-0: bootstrap agent-platform app")` opens a PR on k3s-dean-gitops
-7. After PR merge: ArgoCD syncs the namespace and ExternalSecrets object; `get_app_status("agent-platform", "stateless")` returns healthy
+7. After PR merge: ArgoCD syncs the namespace and ExternalSecrets object; `kubectl get secret -n agent-platform` shows secrets populated from BWS; `get_app_status("agent-platform", "stateless")` returns healthy
 
-**End-to-end stateful path (via MCP):**
-8. `provision_app("qdrant-test")` creates secrets in BWS and a test database — then TOML and generated resources are cleaned up (proves Tofu stateful path works without Ansible)
+**End-to-end stateful GitOps path (no Ansible):**
+8. Add a compose service stub to `komodo-dean-gitops`, push to main → Komodo picks it up and deploys without any Ansible step (proves stateful deploy is pure GitOps)
 
 **CLAUDE.md files:**
 9. All four repos (`app-factory`, `k3s-dean-gitops`, `komodo-dean-gitops`, `ansible-playbooks`) have `CLAUDE.md` files committed to main
