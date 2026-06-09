@@ -62,7 +62,7 @@ The "dispatcher" is now Hatchet. Writing one is off the table.
 ```
 External events
 ──────────────────────────────────────────────────
-  Vikunja (cron poll)   GitHub PR webhook   Any future interface
+  Vikunja (webhook)     GitHub PR webhook   Any future interface
          │                    │                (chat, voice, API)
          │                    │                      │
          └────────────────────┴──────────────────────┘
@@ -96,7 +96,7 @@ External events
 
 ### How triggers work in Hatchet
 
-**Vikunja webhook** — Vikunja POSTs to `https://hatchet.amer.dev/api/v1/events/vikunja-label` on `task.label.added` events. An adapter validates the HMAC signature (webhook secret from BWS) and pushes the appropriate Hatchet event. Near-instant — no polling delay. Idempotency key prevents duplicate runs from duplicate deliveries.
+**Vikunja webhook** — Vikunja POSTs to `https://agent-platform.amer.dev/webhooks/vikunja` on `task.updated` and `task.created` events (Vikunja has no `task.label.added` event — label changes arrive as `task.updated`). A FastAPI adapter validates the `X-Vikunja-Signature` HMAC-SHA256, inspects the task's current label list, and pushes the appropriate Hatchet event. If both `ai-research` and `ai-go` labels are present, it pushes `pipeline:research_code` directly. Idempotency key `vikunja-{task_id}-{label_id}` prevents duplicate runs.
 
 **GitHub PR webhook** — Hatchet receives the GitHub webhook directly, dispatches to PR Reviewer worker. Webhook secret validated via `X-Hub-Signature-256` HMAC before event is accepted.
 
@@ -527,8 +527,21 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 **Pre-conditions:**
 - Phase 2 complete (Qdrant running, Mac Mini PostgreSQL healthy)
-- `HATCHET_SERVER_SECRET` created in Bitwarden (generate via `openssl rand -hex 32`)
-- `HATCHET_ENCRYPTION_KEY` created in Bitwarden (must be base64-encoded 32 random bytes: `openssl rand -base64 32`) — this is NOT a standard password; `generate=true` in TOML produces the wrong format. Create manually in BWS until `secret_format: base64_bytes` is implemented in app-factory.
+- Hatchet encryption keysets generated and stored in BWS (see below — these are NOT simple passwords)
+
+**Hatchet encryption keys — how to generate (one-time, before provisioning):**
+Hatchet uses [Tink](https://github.com/google/tink) keysets for encryption and JWT signing. These must be generated with the `hatchet-admin` CLI, not `openssl`. Run this locally:
+```bash
+docker run --rm -v /tmp/hatchet-keys:/keys \
+  ghcr.io/hatchet-dev/hatchet/hatchet-lite:latest \
+  /hatchet-admin keyset create-local-keys --key-dir /keys
+# Outputs: master.key, jwt-public.key, jwt-private.key
+```
+Store all three in BWS:
+- `hatchet-master-keyset` ← contents of `master.key`
+- `hatchet-jwt-public-keyset` ← contents of `jwt-public.key`
+- `hatchet-jwt-private-keyset` ← contents of `jwt-private.key`
+- `hatchet-cookie-secrets` ← `openssl rand -hex 16` (space-separated pair: run twice, join with space)
 
 **What gets built:**
 
@@ -537,43 +550,63 @@ Provision via MCP:
 ```
 scaffold_app("hatchet", "stateless k3s workflow engine with PostgreSQL backend", "stateless")
 # Edit app-factory/apps/hatchet.toml:
-#   component: image ghcr.io/hatchet-dev/hatchet:v0.53.0, port 7077  ← pin version
-#   secrets: HATCHET_SERVER_SECRET (generate=false — created in BWS manually above)
-#            HATCHET_ENCRYPTION_KEY (generate=false — created in BWS manually above)
+#   component: image ghcr.io/hatchet-dev/hatchet/hatchet-lite:latest
+#              ports: 8888 (HTTP/UI/REST), 7077 (gRPC — workers connect here)
+#   secrets (all generate=false — created in BWS above):
+#     SERVER_ENCRYPTION_MASTER_KEYSET       ← hatchet-master-keyset
+#     SERVER_ENCRYPTION_JWT_PUBLIC_KEYSET   ← hatchet-jwt-public-keyset
+#     SERVER_ENCRYPTION_JWT_PRIVATE_KEYSET  ← hatchet-jwt-private-keyset
+#     SERVER_AUTH_COOKIE_SECRETS            ← hatchet-cookie-secrets
 #   database: name "hatchet", host "10.100.20.18"
 provision_app("hatchet")   # hatchet DB + role created in Mac Mini PG, manifests generated
 open_deploy_pr("hatchet", "phase-3: deploy Hatchet workflow engine")
 ```
 
-**Initial Hatchet setup (one-time, after first deploy):**
-Hatchet requires a database migration and tenant bootstrap on first start. Run as a Kubernetes Job (add to the Hatchet gitops directory as a supplementary `migration-job.yaml`):
-```bash
-kubectl -n hatchet create job hatchet-init --image=ghcr.io/hatchet-dev/hatchet:v0.53.0 \
-  -- /hatchet-admin quickstart --skip-create-tenant=false
-```
-This creates the schema, default tenant, and first admin user. After this job completes:
-1. Log into `https://hatchet.amer.dev` and generate a worker API token (Settings → API Tokens)
-2. Store this token in BWS as `hatchet-worker-token`
-3. Add `HATCHET_WORKER_TOKEN` secret (generate=false) to `agent-platform.toml` so all worker pods can authenticate
+Supplementary files for the Hatchet deployment (alongside generated manifests):
+- `configmap.yaml` — non-secret runtime config:
+  ```yaml
+  SERVER_URL: "https://hatchet.amer.dev"
+  SERVER_GRPC_BROADCAST_ADDRESS: "hatchet.hatchet.svc.cluster.local:7077"
+  SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
+  SERVER_GRPC_PORT: "7077"
+  SERVER_AUTH_COOKIE_DOMAIN: "hatchet.amer.dev"
+  SERVER_AUTH_COOKIE_INSECURE: "f"
+  SERVER_DEFAULT_ENGINE_VERSION: "V1"
+  SERVER_MSGQUEUE_KIND: "postgres"
+  DATABASE_URL: "postgresql://hatchet:<pw>@10.100.20.18:5432/hatchet"
+  ```
+  Note: `SERVER_GRPC_BROADCAST_ADDRESS` uses the in-cluster service name so workers in other namespaces resolve it without leaving the cluster.
+- `service-grpc.yaml` — separate Service for gRPC port 7077 (ClusterIP, not exposed via Ingress)
+- IngressRoute routes to port 8888 only (HTTP UI + REST API)
+
+**Initial Hatchet setup (one-time, done in the web UI after first deploy):**
+The Hatchet Lite image auto-runs migrations on startup — no separate migration job needed. After first deploy:
+1. Navigate to `https://hatchet.amer.dev` → complete the first-run setup wizard (set admin email + password)
+2. Go to Settings → API Tokens → create a token named `agent-platform-workers`
+3. Store this token in BWS as `hatchet-client-token`
+4. Add `HATCHET_CLIENT_TOKEN` secret (generate=false) to `agent-platform.toml` — workers read this env var to authenticate
+
+**Worker gRPC networking:** Workers in the `agent-platform` namespace connect to `hatchet.hatchet.svc.cluster.local:7077`. This requires the `service-grpc.yaml` ClusterIP service above. Workers do NOT need to go through the Ingress — gRPC travels in-cluster.
 
 **In `agent-platform` repo:**
-- `workers/stub/main.py` — minimal Hatchet worker: connects using `HATCHET_WORKER_TOKEN`, accepts `test:ping` event, logs payload, returns `{"status": "ok"}`
+- `workers/stub/main.py` — minimal Hatchet worker: initializes with `Hatchet()` (reads `HATCHET_CLIENT_TOKEN` from env), registers `test:ping` event handler, logs payload, returns `{"status": "ok"}`
 - `workers/stub/Dockerfile`
 
 Stub worker component added to `agent-platform.toml` → `provision_app("agent-platform")` → PR to k3s-dean-gitops.
 
 Hatchet cron registered in code at worker startup:
 - Every 5 minutes → push `test:ping` event with timestamp payload
-- Cron expression as env var: `STUB_CRON_INTERVAL` (default `*/5 * * * *`) so it's configurable via ConfigMap without a code change
+- Cron expression as env var: `STUB_CRON_INTERVAL` (default `*/5 * * * *`) — configurable via ConfigMap
 
 **Ready conditions (all must pass):**
-1. `https://hatchet.amer.dev` loads the UI and login works
-2. `hatchet` database exists in PostgreSQL with correct owner (created by `provision_app` Tofu)
-3. Manually push `test:ping` event via Hatchet API → run appears in UI with status `SUCCEEDED` and logged payload
-4. Cron fires on schedule → run appears in UI automatically without manual trigger
-5. Kill the stub worker pod mid-run → Hatchet retries after worker comes back up
-6. Hatchet UI shows run history, logs, input/output for all past runs
-7. ArgoCD shows Hatchet app synced and healthy
+1. `https://hatchet.amer.dev` loads the UI and login works with the admin credentials set in step 1 above
+2. `hatchet` database exists in Mac Mini PostgreSQL with correct owner (created by `provision_app` Tofu)
+3. Stub worker pod is running and shows as connected in Hatchet UI (Workers tab)
+4. Manually push `test:ping` event via Hatchet REST API → run appears in UI with status `SUCCEEDED` and logged payload
+5. Cron fires on schedule → run appears in UI automatically without manual trigger
+6. Kill the stub worker pod mid-run → Hatchet retries and succeeds after pod restarts
+7. `kubectl exec` into a test pod in `agent-platform` namespace: `nc -zv hatchet.hatchet.svc.cluster.local 7077` succeeds (proves gRPC reachable cross-namespace)
+8. ArgoCD shows Hatchet app synced and healthy
 
 ---
 
@@ -582,51 +615,81 @@ Hatchet cron registered in code at worker startup:
 **Goal:** Two Hatchet workers share a memory namespace via Mem0. One writes, the other reads.
 
 **Pre-conditions:**
-- Phase 2 complete (Qdrant running, `mem0` database exists)
-- Phase 3 complete (Hatchet healthy, stub worker deployed)
-- `MEM0_API_KEY` created in Bitwarden
+- Phase 2 complete (Qdrant running at `10.100.20.18:6333`, Mac Mini PostgreSQL healthy)
+- Phase 3 complete (Hatchet healthy, `HATCHET_CLIENT_TOKEN` in BWS, stub worker connected)
+- `MEM0_API_KEY` does not need manual creation — generated by Tofu (`generate=true`)
 
 **What gets built:**
 
-Mem0 needs its own API key and access to Qdrant + PostgreSQL credentials. Provision via MCP:
+Mem0 needs access to Qdrant and PostgreSQL. The self-hosted Mem0 OSS server image is `ghcr.io/mem0ai/mem0:latest`. Provision via MCP:
 
 ```
 scaffold_app("mem0", "stateless memory layer backed by Qdrant vector store and PostgreSQL", "stateless")
 # Edit app-factory/apps/mem0.toml:
-#   component: Mem0 server image, port 8000
-#   secrets: MEM0_API_KEY (generate=true), QDRANT_API_KEY (generate=false — already in BWS from Phase 2)
-#   database: name "mem0", host "10.100.20.18"
-provision_app("mem0")   # secrets → BWS, mem0 DB already exists (Phase 2), manifests generated
+#   component: image ghcr.io/mem0ai/mem0:latest, port 8000
+#   secrets: MEM0_API_KEY (generate=true)
+#            QDRANT_API_KEY (generate=false — already in BWS from Phase 2)
+#   database: name "mem0", host "10.100.20.18"  ← Tofu creates this DB
+provision_app("mem0")   # MEM0_API_KEY → BWS, mem0 DB + role created in Mac Mini PG, manifests generated
 open_deploy_pr("mem0", "phase-4: deploy Mem0 memory layer")
 ```
 
-Supplementary files: Qdrant endpoint env vars added alongside generated ExternalSecret.
-
-**In `agent-platform` repo:**
-- No hand-rolled `memory.py` wrapper. Agents use Mem0's built-in MCP server directly — it ships with Mem0 and is available at `https://mem0.amer.dev/mcp`. Register it in `~/.claude.json` alongside `infra-mcp`. PydanticAI agents declare `add_memory` / `search_memory` / `get_memories` as MCP tools.
-- Two Hatchet workers added to `agent-platform.toml` as components: worker A (`test:mem-write`), worker B (`test:mem-read`). Both use the Mem0 MCP tools.
-- `provision_app("agent-platform")` → PR to k3s-dean-gitops
-
-**Memory cleanup worker** — add to `agent-platform.toml` as a lightweight cron worker:
-```python
-VIKUNJA_CLEANUP_CRON = os.environ.get("MEMORY_CLEANUP_CRON", "0 3 * * 0")  # weekly Sunday 3am
-
-@hatchet.cron(VIKUNJA_CLEANUP_CRON)
-async def cleanup_task_memories(ctx):
-    # delete task-scoped memories older than 7 days with no associated open Vikunja task
-    stale = mem0.search("", agent_id_prefix="task-", older_than_days=7)
-    for m in stale:
-        mem0.delete(m.id)
+Supplementary ConfigMap alongside generated ExternalSecret:
+```yaml
+MEM0_VECTOR_STORE_PROVIDER: "qdrant"
+MEM0_VECTOR_STORE_HOST: "10.100.20.18"
+MEM0_VECTOR_STORE_PORT: "6333"
+MEM0_LLM_PROVIDER: "litellm"
+MEM0_LLM_MODEL: "qwen3.6"
+MEM0_LLM_BASE_URL: "https://litellm.amer.dev/v1"
+MEM0_EMBEDDER_PROVIDER: "ollama"
+MEM0_EMBEDDER_MODEL: "nomic-embed-text"
+MEM0_EMBEDDER_BASE_URL: "http://10.100.20.18:11434"
 ```
+
+**Memory access in agents — use Python SDK, not MCP:**
+The self-hosted Mem0 OSS server does not expose an MCP endpoint — that is OpenMemory (cloud product). Agents use the `mem0` Python SDK pointed at the self-hosted REST API:
+```python
+from mem0 import MemoryClient
+
+# Configured via env vars: MEM0_BASE_URL, MEM0_API_KEY
+memory = MemoryClient(host=os.environ["MEM0_BASE_URL"], api_key=os.environ["MEM0_API_KEY"])
+
+# Wrapped as PydanticAI tools in common/memory_tools.py
+def add_memory(content: str, agent_id: str) -> str:
+    memory.add(content, agent_id=agent_id)
+    return "stored"
+
+def search_memory(query: str, agent_id: str) -> list[str]:
+    results = memory.search(query, agent_id=agent_id)
+    return [r["memory"] for r in results]
+```
+These two functions are registered as tools on every PydanticAI agent. `common/memory_tools.py` is the single shared location — no duplication per agent.
+
+**Memory cleanup worker** — lightweight Hatchet cron worker added to `agent-platform.toml`:
+```python
+@hatchet.cron(os.environ.get("MEMORY_CLEANUP_CRON", "0 3 * * 0"))  # weekly Sun 3am
+async def cleanup_task_memories(ctx):
+    # Purge task-scoped memories older than 7 days
+    all_memories = memory.get_all(agent_id_prefix="task-")
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    for m in all_memories:
+        if datetime.fromisoformat(m["created_at"]) < cutoff:
+            memory.delete(m["id"])
+```
+
+Two test workers added to `agent-platform.toml` as components: `mem-write-worker` (`test:mem-write`), `mem-read-worker` (`test:mem-read`).
+`provision_app("agent-platform")` → PR to k3s-dean-gitops.
 
 **Ready conditions (all must pass):**
 1. `curl -sf -H "Authorization: Bearer $MEM0_API_KEY" https://mem0.amer.dev/v1/memories/?agent_id=test` returns `[]` (empty, not an error)
-2. Mem0 MCP server endpoint reachable: `https://mem0.amer.dev/mcp` lists `add_memory` / `search_memory` tools
-3. Push `test:mem-write` event → worker A writes a fact via MCP tool → Hatchet run `SUCCEEDED`
-4. Push `test:mem-read` event with same `agent_id` → worker B retrieves the fact written in step 3 via MCP tool
+2. `mem0` database exists in Mac Mini PostgreSQL with correct owner (created by `provision_app` Tofu)
+3. Push `test:mem-write` event → `mem-write-worker` calls `memory.add(content, agent_id="test-shared")` → Hatchet run `SUCCEEDED`
+4. Push `test:mem-read` event → `mem-read-worker` calls `memory.search("fact", agent_id="test-shared")` → returns the fact written in step 3 → run `SUCCEEDED`
 5. Push 10 concurrent `test:mem-write` events → all 10 runs succeed, all 10 facts retrievable (concurrent write test)
-6. `mem0` database exists in PostgreSQL with correct owner (created by `provision_app` Tofu)
-7. ArgoCD shows Mem0 app synced and healthy
+6. Mem0 reads Qdrant: verify a collection named `mem0` exists in Qdrant at `10.100.20.18:6333`
+7. Mem0 uses LiteLLM for memory extraction: check Mem0 pod logs show LiteLLM calls to `litellm.amer.dev` on memory adds
+8. ArgoCD shows Mem0 app synced and healthy
 
 ---
 
@@ -637,7 +700,7 @@ async def cleanup_task_memories(ctx):
 **Pre-conditions:**
 - Phases 1–4 complete and healthy
 - SearXNG reachable from k3s at `https://searxng.amer.dev` (already deployed)
-- `VIKUNJA_TOKEN` available as k3s Secret
+- `VIKUNJA_TOKEN` added to BWS manually (generate=false — it is a Vikunja API token, not a generated password). Add `vikunja-token` to BWS, then add `VIKUNJA_TOKEN` secret ref to `agent-platform.toml`
 
 **What gets built — `agent-platform/agents/research/`:**
 - `agent.py` — PydanticAI agent with tools:
@@ -648,11 +711,21 @@ async def cleanup_task_memories(ctx):
 - `Dockerfile`
 
 **Trigger: Vikunja webhook (not polling)**
-Configure a Vikunja webhook (Settings → Webhooks) targeting `https://hatchet.amer.dev/api/v1/events/vikunja-label`. Fire on `task.label.added` events. A small adapter endpoint (or Hatchet's native webhook support) validates the payload and pushes `agent:research` for label ID 14, `agent:code` for label 11, etc. This replaces the 15-minute polling cron entirely — tasks trigger within seconds of labelling.
+Vikunja does not have a `task.label.added` event. Label changes arrive as `task.updated`. The webhook adapter must detect label changes:
 
-Webhook secret stored in BWS as `vikunja-webhook-secret`; validated in the adapter to prevent spoofed events.
+1. Configure a **project webhook** in Vikunja (project Settings → Webhooks) targeting `https://agent-platform.amer.dev/webhooks/vikunja`. Subscribe to `task.updated` (and `task.created` to catch tasks created with labels already applied). Set a secret — Vikunja signs with `X-Vikunja-Signature` (HMAC-SHA256).
 
-**Deduplication:** Hatchet's idempotency key feature is used — the event is pushed with `idempotency_key=f"vikunja-task-{task_id}"`. Duplicate webhooks (label added twice, retry) do not create duplicate runs.
+2. The adapter endpoint lives in `agent-platform/webhooks/vikunja.py` (a small FastAPI router mounted alongside the workers). It:
+   - Validates `X-Vikunja-Signature` against `VIKUNJA_WEBHOOK_SECRET` from env
+   - Inspects `data.task.labels` in the payload for known label IDs (14 = `ai-research`, 11 = `ai-go`, 13 = `ai-plan-only`)
+   - For each matching label, pushes the corresponding Hatchet event with `idempotency_key=f"vikunja-{task_id}-{label_id}"`
+   - If a task has BOTH labels 14 and 11 → pushes `pipeline:research_code` instead of individual events
+
+3. The webhook adapter is a component in `agent-platform.toml` — a lightweight FastAPI service exposed via Ingress at `https://agent-platform.amer.dev/webhooks/vikunja`. It does NOT run inside a Hatchet worker.
+
+Webhook secret stored in BWS as `vikunja-webhook-secret` (generate=true in TOML).
+
+**Deduplication:** Events are pushed with `idempotency_key=f"vikunja-{task_id}-{label_id}"`. Duplicate `task.updated` deliveries for the same label do not create duplicate Hatchet runs.
 
 Deploy: add `research-worker` component to `agent-platform.toml` → `provision_app("agent-platform")` → `open_deploy_pr("agent-platform", "phase-5: research worker")`
 
@@ -678,9 +751,9 @@ Deploy: add `research-worker` component to `agent-platform.toml` → `provision_
 - `agent.py` — PydanticAI agent with tools:
   - `git_clone(repo, branch)`, `git_commit(message)`, `git_push()`, `open_pr(title, body)`
   - `read_file(path)`, `write_file(path, content)`, `run_shell(cmd)` (scoped to `SCRATCH_DIR` emptyDir mount)
-  - `search_memory` → Mem0 MCP tool, reads research context from `task-{id}` namespace if it exists
+  - `search_memory(query, agent_id)` → calls `common/memory_tools.py`, reads research context from `task-{id}` namespace if it exists
 - `worker.py` — Hatchet worker handling `agent:code` events
-- Vikunja webhook extended: label 11 (`ai-go`) → pushes `agent:code` event (same adapter as Phase 5)
+- Vikunja webhook adapter (Phase 5) already handles label 11 (`ai-go`) → no code change needed in adapter
 
 **Coder worker TOML additions:**
 ```toml
@@ -707,7 +780,7 @@ Deploy: add `coder-worker` component to `agent-platform.toml` → `provision_app
 
 **Ready conditions (all must pass):**
 1. Create Vikunja task "Add /healthz endpoint to ecdysis", label `ai-go`, repo `amerenda/ecdysis` in description
-2. Within 15 minutes: Hatchet UI shows `agent:code` run `SUCCEEDED`
+2. Within 30 seconds: Hatchet UI shows `agent:code` run triggered (webhook-based, not polling)
 3. A draft PR exists on `amerenda/ecdysis` on a new branch
 4. PR description references the Vikunja task ID
 5. Vikunja task is marked done with the PR link as a comment
@@ -729,8 +802,11 @@ Deploy: add `coder-worker` component to `agent-platform.toml` → `provision_app
 PR Reviewer — `agent-platform/agents/pr_reviewer/`:
 - `agent.py` — PydanticAI agent: reads PR diff via GitHub API, posts structured review comment
 - `worker.py` — Hatchet worker handling `github:pr_opened` events
-- GitHub webhook on `amerenda` org: `pull_request.opened` → Hatchet events API endpoint
-- Webhook adapter validates `X-Hub-Signature-256` HMAC against `GITHUB_WEBHOOK_SECRET` before accepting; returns 401 on invalid signature. Secret stored in BWS → ExternalSecret → env var.
+- GitHub webhook on `amerenda` org: event `pull_request`, action `opened` → target URL `https://agent-platform.amer.dev/webhooks/github`
+- Webhook adapter at `agent-platform/webhooks/github.py` (same FastAPI app as Vikunja adapter):
+  - Validates `X-Hub-Signature-256` HMAC-SHA256 against `GITHUB_WEBHOOK_SECRET` (stored in BWS)
+  - On `pull_request.opened`: pushes `github:pr_opened` Hatchet event with `{repo, pr_number, pr_url, diff_url, author}`
+  - Returns 401 on invalid signature, 200 on success — GitHub retries on non-2xx
 
 QA — `agent-platform/agents/qa/`:
 - `agent.py` — PydanticAI agent: tests staging URL using `playwright` Python library (HTTP + UI flows, not just curl)
@@ -774,7 +850,7 @@ Deploy: add `pr-reviewer-worker` and `qa-worker` components to `agent-platform.t
   - `ResearchNode`: runs research agent, writes output to `task-{id}` Mem0 namespace
   - `CoderNode`: reads `task-{id}` Mem0 namespace, runs coder agent with that context
 - New Hatchet worker executing the pipeline as a DAG (Hatchet has native DAG support)
-- Vikunja poller: tasks with both `ai-research` AND `ai-go` labels → `pipeline:research_code` event
+- The Phase 5 Vikunja webhook adapter already handles this: when a `task.updated` event arrives with BOTH label 14 and label 11 present, the adapter pushes `pipeline:research_code` instead of the individual `agent:research` and `agent:code` events. No new webhook code needed — update the adapter's label routing logic.
 
 Deploy: add `pipeline-worker` component to `agent-platform.toml` → `provision_app("agent-platform")` → `open_deploy_pr("agent-platform", "phase-8: pipeline worker")`
 
