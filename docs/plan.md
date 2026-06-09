@@ -254,21 +254,20 @@ Tofu (generate) → BWS (store)
 
 #### Pattern B: Stateful App (Komodo on Mac Mini)
 
-**Toolchain:** Ansible (infra) → komodo-dean-gitops → Komodo (deploy)
+**Toolchain:** Tofu (databases + secrets) → komodo-dean-gitops → Komodo (deploy)
 
-**Step 1 — Infrastructure (Ansible):**
-Add tasks to `ansible-playbooks/` for any host-level prerequisites:
-- Docker volumes: `community.docker.docker_volume`
-- PostgreSQL databases/roles/extensions: `community.postgresql.*`
-- System packages, config files, network setup
+Ansible is **not** part of this flow. Ansible is run by a human when provisioning a new server (installing Docker, PostgreSQL, system packages) and for correcting configuration drift. It is never triggered by an AI agent and is never part of a deployment pipeline.
 
-Run with only `BWS_ACCESS_TOKEN` as input. All credentials fetched from BWS at runtime.
-Ansible playbooks are idempotent — safe to re-run at any time.
+**Step 1 — Provision databases and secrets (Tofu):**
+If the stateful service needs a PostgreSQL database or generated secrets, add a spec to `app-factory/apps/<name>.toml` and run `provision_app("<name>")`. Tofu creates the database/role in Mac Mini PostgreSQL and writes secrets to BWS, identical to the stateless path. If there is no database needed, skip this step.
+
+Docker volumes do not need pre-creation. Named volumes declared in compose files are created automatically by Docker on first start and persist across redeploys. Do not use `external: true` unless the volume was created by a separate system. Do not use Ansible to pre-create volumes.
 
 **Step 2 — Service definition (GitOps):**
 Add the service to the appropriate Komodo stack in `komodo-dean-gitops/mac-mini-m4/<stack>/compose.yaml`.
 - Secrets referenced as `${SECRET_NAME}` — values come from Komodo's BWS-synced env at deploy time
 - No hardcoded values in compose files
+- Volumes declared without `external: true` — Komodo/Docker creates them on first deploy
 - New stacks: add `<stack>/compose.yaml` and register in Komodo
 
 **Step 3 — Deploy:**
@@ -291,9 +290,9 @@ Docker Compose env vars
 
 | Tool | Repo | Role | When to use |
 |------|------|------|-------------|
-| OpenTofu | `app-factory/tofu/` | Secret generation + PostgreSQL provisioning | New stateless app with a DB or generated secrets |
+| OpenTofu | `app-factory/tofu/` | Secret generation + PostgreSQL provisioning | Any new app (stateless or stateful) that needs a DB or generated secrets |
 | app-factory generate.py | `app-factory/generate/` | k8s manifest generation from TOML spec | Every stateless app |
-| Ansible | `ansible-playbooks/` | Host-level infra (volumes, PG on Mac Mini, system config) | Stateful app dependencies, anything not gitops-able |
+| Ansible | `ansible-playbooks/` | **Server provisioning only** — installs packages, configures OS, provisions new nodes, corrects drift | Run by a human when a new server is added or configuration drifts. Never run by AI, never run in deploy pipelines |
 | ArgoCD | k3s cluster | Syncs `k3s-dean-gitops` → k3s | Stateless app deployment |
 | Komodo | Mac Mini | Deploys `komodo-dean-gitops` stacks | Stateful app deployment |
 | ExternalSecrets | k3s cluster | BWS → k8s Secret sync | All k3s secret delivery |
@@ -315,12 +314,11 @@ A Python `fastmcp` server exposing infrastructure operations as first-class MCP 
 
 | Tool | Inputs | What it does |
 |------|--------|--------------|
-| `scaffold_app` | `name`, `description`, `type: "stateless"\|"stateful"\|"auto"` | Infers type from description if `auto`. Stateless: generates `app-factory/apps/<name>.toml` from template with sensible defaults. Stateful: generates compose service stub in `komodo-dean-gitops/<host>/<stack>/` and Ansible role stub in `ansible-playbooks/roles/<name>/`. Returns paths created + what to fill in. |
-| `provision_app` | `name` | Stateless only. Validates `app-factory/apps/<name>.toml` exists and has no inline secret values. Runs `make create-app APP=<name>`. Returns generated manifest paths. Fails loudly if TOML has hardcoded passwords. |
+| `scaffold_app` | `name`, `description`, `type: "stateless"\|"stateful"\|"auto"` | Infers type from description if `auto`. Stateless: generates `app-factory/apps/<name>.toml` from template. Stateful: generates compose service stub in `komodo-dean-gitops/<host>/<stack>/` AND a `app-factory/apps/<name>.toml` for DB/secret provisioning if needed. Returns paths created + what to fill in. |
+| `provision_app` | `name` | Runs Tofu for the named app: generates secrets → writes to BWS; creates PostgreSQL role + database. Works for both stateless (also generates k8s manifests) and stateful (DB/secrets only, no manifests). Validates no inline secrets before running. |
 | `open_deploy_pr` | `name`, `title` | Opens a PR on `k3s-dean-gitops` with the generated manifests. Returns PR URL. Never pushes directly to main. |
 | `check_secret_hygiene` | `repo` (optional, defaults all gitops repos) | Runs `git grep` for hardcoded secret patterns. Returns violations or `"clean"`. |
 | `get_app_status` | `name`, `type` | Stateless: queries ArgoCD API for sync + health status. Stateful: queries Komodo API for stack status. Returns human-readable + structured status. |
-| `run_ansible` | `playbook`, `hosts` | Runs a playbook from `ansible-playbooks/`. Reads `BWS_ACCESS_TOKEN` from env — no other secrets accepted as parameters. Returns stdout/stderr. |
 
 **Type inference in `scaffold_app`:** The tool uses keyword matching to infer `stateless` vs `stateful`:
 - Stateful signals: "GPU", "local storage", "filesystem", "persistent", "mac mini", "murderbot", "hardware"
@@ -360,14 +358,17 @@ Each repo gets a `CLAUDE.md` that states the single workflow for that repo. An A
 **`komodo-dean-gitops/CLAUDE.md`:**
 - "Stateful services only. If the service has no local state, it belongs in k3s-dean-gitops instead."
 - "Secrets in compose files use `${SECRET_NAME}` syntax. Values come from Komodo's BWS sync at runtime."
-- "Before adding a new service: run the `run_ansible` MCP tool with the infra playbook first (creates volumes, PG databases)."
+- "To add a new service: run `provision_app` MCP tool (creates DB + secrets via Tofu), then add the compose service block here and push to main."
+- "Named volumes declared in compose files are created by Docker on first start — do not pre-create them with Ansible or mark them `external: true`."
 - "Never hardcode ports that conflict with `network_mode: host` services — check existing services first."
 
 **`ansible-playbooks/CLAUDE.md`:**
-- "Ansible provisions infrastructure that can't be GitOps'd: Docker volumes, PostgreSQL databases/roles, system packages."
-- "Ansible does NOT deploy services. Deployment is Komodo (stateful) or ArgoCD (stateless)."
-- "Every playbook reads secrets from BWS via `BWS_ACCESS_TOKEN` env var. No other secrets as inputs."
-- "All tasks must be idempotent. Use `community.docker.docker_volume` (not `docker volume create`), `community.postgresql.*` (not raw SQL)."
+- "Ansible is for server provisioning only: installing packages, configuring OS, adding users, provisioning new nodes, correcting configuration drift."
+- "Ansible does NOT deploy services and is NOT called as part of any deployment pipeline. Deployment is Komodo (stateful) or ArgoCD (stateless)."
+- "Docker volumes and PostgreSQL databases are NOT created by Ansible. Volumes are created by Docker on first compose start. Databases are created by Tofu via `provision_app`."
+- "Every playbook reads exactly one secret from env: `BWS_ACCESS_TOKEN`. No other secrets as inputs."
+- "All tasks must be idempotent."
+- "Ansible is run by a human when adding a new server or correcting drift — never by an AI agent."
 - Template for new playbook included inline.
 
 ---
@@ -397,11 +398,10 @@ This is also the first app that will be populated in Phases 1–8.
 7. After PR merge: ArgoCD syncs the namespace and ExternalSecrets object; `get_app_status("agent-platform", "stateless")` returns healthy
 
 **End-to-end stateful path (via MCP):**
-8. `run_ansible("mac-mini-core.yml", "mac_mini")` completes with only `BWS_ACCESS_TOKEN` in env
-9. Second run produces zero changes (idempotency verified)
+8. `provision_app("qdrant-test")` creates secrets in BWS and a test database — then TOML and generated resources are cleaned up (proves Tofu stateful path works without Ansible)
 
 **CLAUDE.md files:**
-10. All four repos (`app-factory`, `k3s-dean-gitops`, `komodo-dean-gitops`, `ansible-playbooks`) have `CLAUDE.md` files committed to main
+9. All four repos (`app-factory`, `k3s-dean-gitops`, `komodo-dean-gitops`, `ansible-playbooks`) have `CLAUDE.md` files committed to main
 
 ---
 
@@ -464,21 +464,13 @@ LiteLLM exports Prometheus metrics at `/metrics` natively — token usage, laten
 
 **Current state:** Mac Mini core stack has Technitium, PostgreSQL (pgvector/pg16, `network_mode: host`, port 5432, databases: `todo`, `agent_kb`), MongoDB. No Qdrant.
 
-**Rule:** No manual steps. All infrastructure changes via Ansible. All service changes via GitOps (Komodo for Mac Mini, ArgoCD for k3s).
+**Rule:** No manual steps. All service changes via GitOps (Komodo for Mac Mini, ArgoCD for k3s). Databases provisioned by Tofu. No Ansible in the deploy flow.
 
 **Pre-conditions:**
 - Mac Mini core stack healthy
-- `QDRANT_API_KEY` added to Bitwarden and synced to the core stack
+- `QDRANT_API_KEY` secret provisioned in Bitwarden (via `provision_app("qdrant")` or manually with `bws secret create`)
 
 **What gets built:**
-
-In `ansible-playbooks/mac-mini-agent-platform.yml` — create the Qdrant Docker volume before Komodo deploys:
-```yaml
-- community.docker.docker_volume:
-    name: services_qdrant-data
-    state: present
-```
-This is the only Ansible task in Phase 2. PostgreSQL databases (`hatchet`, `mem0`) are created by Tofu in Phases 3 and 4 — Ansible does not touch them here.
 
 In `komodo-dean-gitops/mac-mini-m4/core/compose.yaml` — add Qdrant service:
 ```yaml
@@ -496,8 +488,10 @@ qdrant:
     interval: 30s
     timeout: 5s
     retries: 3
+
+volumes:
+  qdrant-data:    # Docker creates this named volume on first start — no pre-creation needed
 ```
-Add `qdrant-data` to volumes block (external, name: `services_qdrant-data`).
 Add `QDRANT_API_KEY` to the stack's Bitwarden-synced env.
 
 In `komodo-dean-gitops/mac-mini-m4/postgres/init.sh` — add new databases for disaster-recovery fresh installs only (existing instance gets them via Tofu in Phases 3/4):
@@ -511,7 +505,7 @@ CREATE DATABASE mem0 OWNER mem0;
 CREATE EXTENSION IF NOT EXISTS vector;
 ```
 
-**Execution order:** `run_ansible("mac-mini-agent-platform.yml", "mac_mini")` via MCP first (creates Qdrant volume), then commit the core compose change to `komodo-dean-gitops` so Komodo deploys the updated stack (Qdrant starts, finds its volume). `run_ansible` is idempotent — safe to re-run.
+**Execution order:** Commit the compose change to `komodo-dean-gitops` main → Komodo picks up the change and deploys Qdrant. Docker creates `qdrant-data` automatically on first container start.
 
 **Ready conditions (all must pass):**
 1. `curl -sf -H "api-key: $QDRANT_API_KEY" http://10.100.20.18:6333/healthz` returns `{"title":"qdrant - version x.x.x"}`
@@ -713,7 +707,15 @@ Two test workers added to `agent-platform.toml` as components: `mem-write-worker
 **Trigger: Vikunja webhook (not polling)**
 Vikunja does not have a `task.label.added` event. Label changes arrive as `task.updated`. The webhook adapter must detect label changes:
 
-1. Configure a **project webhook** in Vikunja (project Settings → Webhooks) targeting `https://agent-platform.amer.dev/webhooks/vikunja`. Subscribe to `task.updated` (and `task.created` to catch tasks created with labels already applied). Set a secret — Vikunja signs with `X-Vikunja-Signature` (HMAC-SHA256).
+1. **Webhook registration is IaC** — declared in `agent-platform.toml` as a `vikunja_webhooks` block, registered by `provision_app` via Tofu's `http` provider:
+   ```toml
+   [[vikunja_webhooks]]
+   project_id = 21          # Mycroft project
+   target_url  = "https://agent-platform.amer.dev/webhooks/vikunja"
+   events      = ["task.updated", "task.created"]
+   secret_bws_key = "vikunja-webhook-secret"   # generate=true; Tofu creates and stores it
+   ```
+   Tofu calls `PUT /api/v1/projects/{id}/webhooks` with the generated secret. Running `provision_app("agent-platform")` again is idempotent — it upserts the webhook registration.
 
 2. The adapter endpoint lives in `agent-platform/webhooks/vikunja.py` (a small FastAPI router mounted alongside the workers). It:
    - Validates `X-Vikunja-Signature` against `VIKUNJA_WEBHOOK_SECRET` from env
@@ -723,14 +725,14 @@ Vikunja does not have a `task.label.added` event. Label changes arrive as `task.
 
 3. The webhook adapter is a component in `agent-platform.toml` — a lightweight FastAPI service exposed via Ingress at `https://agent-platform.amer.dev/webhooks/vikunja`. It does NOT run inside a Hatchet worker.
 
-Webhook secret stored in BWS as `vikunja-webhook-secret` (generate=true in TOML).
+Webhook secret stored in BWS as `vikunja-webhook-secret` (generate=true in TOML). Tofu owns creation; `provision_app` handles registration.
 
 **Deduplication:** Events are pushed with `idempotency_key=f"vikunja-{task_id}-{label_id}"`. Duplicate `task.updated` deliveries for the same label do not create duplicate Hatchet runs.
 
 Deploy: add `research-worker` component to `agent-platform.toml` → `provision_app("agent-platform")` → `open_deploy_pr("agent-platform", "phase-5: research worker")`
 
 **Ready conditions (all must pass):**
-1. Vikunja webhook configured and shows a green delivery status in the Vikunja UI
+1. `provision_app("agent-platform")` completes; Vikunja project settings show the webhook registered with `https://agent-platform.amer.dev/webhooks/vikunja` — no manual UI step
 2. Create Vikunja task "Research: summarize recent k3s releases", label `ai-research` → Hatchet UI shows `agent:research` run within 30 seconds (not 15 minutes)
 3. `GET https://mem0.amer.dev/v1/memories/?agent_id=task-<id>` returns the research report
 4. Vikunja task is marked done with a comment containing the report summary
@@ -794,15 +796,24 @@ Deploy: add `coder-worker` component to `agent-platform.toml` → `provision_app
 
 **Pre-conditions:**
 - Phases 1–4 complete
-- GitHub webhook can reach `hatchet.amer.dev` (public ingress already set up)
-- `GITHUB_WEBHOOK_SECRET` generated and stored in BWS; configured in the GitHub org webhook settings
+- GitHub webhook can reach `agent-platform.amer.dev` (public ingress already set up)
+- `GITHUB_TOKEN` (with `admin:org_hook` scope) available in BWS for Tofu to register the org webhook
 
 **What gets built:**
+
+**Webhook registration is IaC** — declared in `agent-platform.toml` as a `github_webhooks` block, registered by `provision_app` via Tofu's `github` provider:
+```toml
+[[github_webhooks]]
+org            = "amerenda"
+target_url     = "https://agent-platform.amer.dev/webhooks/github"
+events         = ["pull_request"]
+secret_bws_key = "github-webhook-secret"   # generate=true; Tofu creates and stores it
+```
+Tofu calls `POST /orgs/{org}/hooks` (GitHub Webhooks API). Running `provision_app` again is idempotent — it upserts the registration.
 
 PR Reviewer — `agent-platform/agents/pr_reviewer/`:
 - `agent.py` — PydanticAI agent: reads PR diff via GitHub API, posts structured review comment
 - `worker.py` — Hatchet worker handling `github:pr_opened` events
-- GitHub webhook on `amerenda` org: event `pull_request`, action `opened` → target URL `https://agent-platform.amer.dev/webhooks/github`
 - Webhook adapter at `agent-platform/webhooks/github.py` (same FastAPI app as Vikunja adapter):
   - Validates `X-Hub-Signature-256` HMAC-SHA256 against `GITHUB_WEBHOOK_SECRET` (stored in BWS)
   - On `pull_request.opened`: pushes `github:pr_opened` Hatchet event with `{repo, pr_number, pr_url, diff_url, author}`
@@ -828,13 +839,14 @@ CI pushes this event; QA agent reads `staging_url` from payload directly — no 
 Deploy: add `pr-reviewer-worker` and `qa-worker` components to `agent-platform.toml` → `provision_app("agent-platform")` → `open_deploy_pr("agent-platform", "phase-7: pr-reviewer and qa workers")`
 
 **Ready conditions (all must pass):**
-1. Send a spoofed webhook (wrong HMAC) to `hatchet.amer.dev` → returns 401, no Hatchet run created
-2. Open a PR on any `amerenda` repo → Hatchet UI shows `github:pr_opened` run within 60 seconds
-3. PR receives a review comment from the agent within 5 minutes of opening
-4. Manually push `deploy:staging` event with valid payload → QA run appears and completes
-5. QA result (pass/fail + details) is posted as a PR comment or Vikunja comment
-6. PR Reviewer handles a deleted PR mid-run gracefully (no unhandled exception)
-7. QA handles an unreachable staging URL gracefully (clear failure message, not a hung run)
+1. `provision_app("agent-platform")` registers GitHub org webhook — `gh api /orgs/amerenda/hooks` shows it; no manual GitHub UI step
+2. Send a spoofed webhook (wrong HMAC) to `agent-platform.amer.dev/webhooks/github` → returns 401, no Hatchet run created
+3. Open a PR on any `amerenda` repo → Hatchet UI shows `github:pr_opened` run within 60 seconds
+4. PR receives a review comment from the agent within 5 minutes of opening
+5. Manually push `deploy:staging` event with valid payload → QA run appears and completes
+6. QA result (pass/fail + details) is posted as a PR comment or Vikunja comment
+7. PR Reviewer handles a deleted PR mid-run gracefully (no unhandled exception)
+8. QA handles an unreachable staging URL gracefully (clear failure message, not a hung run)
 
 ---
 
