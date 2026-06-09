@@ -609,6 +609,52 @@ router_settings:
 
 **Adding a new runner:** Add a new `model_list` entry pointing to the new runner's endpoint. Update the ConfigMap, push to gitops. ArgoCD syncs and LiteLLM hot-reloads the config — no pod restart required.
 
+**Model-to-runner assignment (heterogeneous GPUs):**
+
+LiteLLM does not discover or enforce hardware constraints — the `model_list` config is the enforcement. Each llama-server instance loads one model at startup; the LiteLLM entry for that model name points only to the runner(s) that have it loaded. This is how you keep big models on big runners:
+
+```yaml
+model_list:
+  # Large model — murderbot only (24GB, RTX 4000)
+  - model_name: qwen3-35b
+    litellm_params:
+      model: openai/qwen3-35b
+      api_base: http://10.100.20.19:8080/v1
+
+  # Medium model — archlinux (16GB, RX 9070 XT)
+  - model_name: qwen3-14b
+    litellm_params:
+      model: openai/qwen3-14b
+      api_base: http://10.100.20.25:8080/v1
+
+  # Small/fast — mac-mini via Ollama (~8GB available)
+  # Ollama can swap models on demand; multiple model names can point here
+  - model_name: qwen3-8b
+    litellm_params:
+      model: ollama/qwen3:8b
+      api_base: http://10.100.20.18:11434
+```
+
+If you want murderbot available as a fallback for smaller models (when smaller runners are down) without it serving them in normal operation, use `fallbacks`:
+
+```yaml
+model_list:
+  - model_name: qwen3-8b           # primary: mac-mini
+    litellm_params:
+      model: ollama/qwen3:8b
+      api_base: http://10.100.20.18:11434
+  - model_name: qwen3-8b-fallback  # emergency: murderbot (if mac-mini is down)
+    litellm_params:
+      model: openai/qwen3-8b
+      api_base: http://10.100.20.19:8080/v1
+
+router_settings:
+  fallbacks:
+    - {"qwen3-8b": ["qwen3-8b-fallback"]}
+```
+
+**mac-mini vs llama-server runners:** Ollama (mac-mini) loads and evicts models dynamically — many model names can point at the same endpoint and Ollama handles the swap. The cost is a cold-start delay when a model was evicted. llama-server (murderbot, archlinux) is static — one model per running instance, no dynamic swapping. Design around this: mac-mini serves a variety of small models opportunistically; dedicated runners serve one model reliably.
+
 **opencode config:** `OPENAI_BASE_URL` updated from `http://localhost:8080` → `https://litellm.amer.dev/v1`
 
 **Retired:**
