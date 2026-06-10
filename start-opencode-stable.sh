@@ -196,7 +196,7 @@ CTV="q4_0"
 BATCH="${BATCH:-512}"
 THREADS="${THREADS:-6}"
 HOST="0.0.0.0"
-PORT="${PORT:-8088}"
+PORT="${PORT:-8080}"
 PARALLEL=1
 VERBOSE="${VERBOSE:-false}"
 
@@ -424,35 +424,67 @@ else
 fi
 echo ""
 
+# ─── LITELLM KEY ─────────────────────────────────────────────────────────────
+# Auto-fetch from k8s secret if not already set in env
+if [ -z "${LITELLM_MASTER_KEY:-}" ]; then
+  LITELLM_MASTER_KEY=$(kubectl get secret -n litellm litellm-secrets \
+    -o jsonpath='{.data.master-key}' 2>/dev/null | base64 -d 2>/dev/null || true)
+fi
+
 # ─── OPENCODE CONFIG ─────────────────────────────────────────────────────────
-OPENCODE_CONFIG_JSON=$(cat << OPENCODE_JSON
+PERMS='"read":"allow","edit":"allow","glob":"allow","grep":"allow","list":"allow","bash":"allow","task":"allow","external_directory":"allow","todowrite":"allow","webfetch":"allow","websearch":"allow","repo_clone":"allow","repo_overview":"allow","lsp":"allow","doom_loop":"allow","skill":"allow","question":"deny"'
+AGENT_PROMPT='Proceed with tasks autonomously without stopping mid-task to ask for confirmation or check-ins. Never ask '"'"'did you sync?'"'"', '"'"'is it pushed?'"'"', '"'"'should I continue?'"'"', or any similar check-in. If you said you will do something, do it immediately. Only stop if you are completely blocked and need information only the user can provide.'
+COMPACTION='"auto":true,"prune":true,"reserved":'"${OPENCODE_RESERVED}"
+
+if [ -n "${LITELLM_MASTER_KEY:-}" ]; then
+  # ── LiteLLM path: opencode → https://litellm.amer.dev/v1 ──────────────────
+  OPENCODE_CONFIG_JSON=$(cat << OPENCODE_JSON
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "model": "litellm/qwen3-35b",
+  "permission": {${PERMS}},
+  "agent": {"build": {"prompt": "${AGENT_PROMPT}"}},
+  "provider": {
+    "litellm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LiteLLM (litellm.amer.dev)",
+      "options": {
+        "baseURL": "https://litellm.amer.dev/v1",
+        "apiKey": "${LITELLM_MASTER_KEY}"
+      },
+      "models": {
+        "qwen3-35b": {
+          "name": "Qwen3.6-35B via LiteLLM",
+          "limit": {
+            "context": ${OPENCODE_CTX},
+            "input": ${OPENCODE_CTX},
+            "output": ${OPENCODE_OUTPUT}
+          }
+        }
+      }
+    }
+  },
+  "compaction": {${COMPACTION}}
+}
+OPENCODE_JSON
+)
+  mkdir -p ~/.config/opencode
+  echo "$OPENCODE_CONFIG_JSON" > ~/.config/opencode/opencode.json
+  echo "OpenCode config ready (LiteLLM mode)"
+  echo "  model:      qwen3-35b via https://litellm.amer.dev/v1"
+  echo "  ctx:        $OPENCODE_CTX tokens  max-output: $OPENCODE_OUTPUT"
+  echo "  compact:    auto, reserved=$OPENCODE_RESERVED"
+  echo "  perms:      allow (all tool calls auto-approved)"
+  echo ""
+
+else
+  # ── Local path: opencode → llama-proxy → llama-server ─────────────────────
+  OPENCODE_CONFIG_JSON=$(cat << OPENCODE_JSON
 {
   "\$schema": "https://opencode.ai/config.json",
   "model": "llamacpp/${MODEL_NAME}",
-  "permission": {
-    "read": "allow",
-    "edit": "allow",
-    "glob": "allow",
-    "grep": "allow",
-    "list": "allow",
-    "bash": "allow",
-    "task": "allow",
-    "external_directory": "allow",
-    "todowrite": "allow",
-    "webfetch": "allow",
-    "websearch": "allow",
-    "repo_clone": "allow",
-    "repo_overview": "allow",
-    "lsp": "allow",
-    "doom_loop": "allow",
-    "skill": "allow",
-    "question": "deny"
-  },
-  "agent": {
-    "build": {
-      "prompt": "Proceed with tasks autonomously without stopping mid-task to ask for confirmation or check-ins. Never ask 'did you sync?', 'is it pushed?', 'should I continue?', or any similar check-in. If you said you will do something, do it immediately. Only stop if you are completely blocked and need information only the user can provide."
-    }
-  },
+  "permission": {${PERMS}},
+  "agent": {"build": {"prompt": "${AGENT_PROMPT}"}},
   "provider": {
     "llamacpp": {
       "npm": "@ai-sdk/openai-compatible",
@@ -473,31 +505,24 @@ OPENCODE_CONFIG_JSON=$(cat << OPENCODE_JSON
       }
     }
   },
-  "compaction": {
-    "auto": true,
-    "prune": true,
-    "reserved": ${OPENCODE_RESERVED}
-  }
+  "compaction": {${COMPACTION}}
 }
 OPENCODE_JSON
 )
-
-mkdir -p ~/.config/opencode
-echo "$OPENCODE_CONFIG_JSON" > ~/.config/opencode/opencode.json
-
-echo "OpenCode config ready"
-echo "  model:        $MODEL_DISPLAY"
-echo "  server ctx:   $CTX tokens"
-echo "  opencode ctx: $OPENCODE_CTX tokens  (proxy safety net for overflow)"
-echo "  max output:   $OPENCODE_OUTPUT tokens"
-echo "  compact:      auto, reserved=$OPENCODE_RESERVED, prune=true  (fires at $(( OPENCODE_CTX - OPENCODE_RESERVED )) estimated tokens)"
-echo "  perms:        allow (all tool calls auto-approved)"
-if [ "$OPENCODE_PORT" = "$PROXY_PORT" ]; then
-  echo "  proxy:        http://127.0.0.1:$PROXY_PORT → http://127.0.0.1:$PORT"
-else
-  echo "  proxy:        DISABLED (direct to server)"
+  mkdir -p ~/.config/opencode
+  echo "$OPENCODE_CONFIG_JSON" > ~/.config/opencode/opencode.json
+  echo "OpenCode config ready (local mode — LiteLLM not available)"
+  echo "  model:      $MODEL_DISPLAY"
+  echo "  server ctx: $CTX  opencode ctx: $OPENCODE_CTX  max-output: $OPENCODE_OUTPUT"
+  echo "  compact:    auto, reserved=$OPENCODE_RESERVED"
+  echo "  perms:      allow (all tool calls auto-approved)"
+  if [ "$OPENCODE_PORT" = "$PROXY_PORT" ]; then
+    echo "  proxy:      http://127.0.0.1:$PROXY_PORT → http://127.0.0.1:$PORT"
+  else
+    echo "  proxy:      DISABLED (direct to server)"
+  fi
+  echo ""
 fi
-echo ""
 
 # ─── LAUNCH OPENCODE ─────────────────────────────────────────────────────────
 echo "Starting opencode..."
