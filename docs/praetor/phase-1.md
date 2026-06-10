@@ -2,14 +2,14 @@
 
 **Goal:** Single inference endpoint for all model calls. opencode and all future agents use one URL. Switching models is a ConfigMap change only.
 
-**Current state:** `opencode → llama-proxy (:8089) → llama-server (:8088 on murderbot) → GPU`
-**After:** `opencode / agents → LiteLLM (k3s, litellm.amer.dev) → llama-server (:8080 on murderbot)`
+**Current state (deployed):** `opencode / agents → LiteLLM (k3s, litellm.amer.dev) → llama-server (:8088 on murderbot) → GPU`
 
-## Pre-conditions
+**Note on port:** llama-server stays on `:8088` — port 8080 is permanently occupied by `svclb-unifi-controller` hostPort on all k3s nodes. All plan references to `:8080` for the murderbot llama-server should be read as `:8088`.
 
-- murderbot llama-server migrated to `:8080` (standard llama.cpp default — done as part of this phase; update start script and llama-proxy config)
-- k3s cluster healthy, ArgoCD green
-- `LITELLM_MASTER_KEY` secret created in Bitwarden
+## Pre-conditions (all met)
+
+- k3s cluster healthy, ArgoCD green ✅
+- `LITELLM_MASTER_KEY` secret created in Bitwarden ✅
 
 ## What Gets Built
 
@@ -43,7 +43,7 @@ model_list:
   - model_name: qwen3-35b
     litellm_params:
       model: openai/qwen3-35b
-      api_base: http://10.100.20.19:8080/v1   # murderbot (RTX 4000)
+      api_base: http://10.100.20.19:8088/v1   # murderbot (RTX 4000)
       api_key: none
   - model_name: qwen3-35b
     litellm_params:
@@ -81,7 +81,7 @@ model_list:
   - model_name: qwen3-35b
     litellm_params:
       model: openai/qwen3-35b
-      api_base: http://10.100.20.19:8080/v1
+      api_base: http://10.100.20.19:8088/v1
 
   # Medium model — archlinux (16GB, RX 9070 XT)
   - model_name: qwen3-14b
@@ -108,7 +108,7 @@ model_list:
   - model_name: qwen3-8b-fallback  # emergency: murderbot (if mac-mini is down)
     litellm_params:
       model: openai/qwen3-8b
-      api_base: http://10.100.20.19:8080/v1
+      api_base: http://10.100.20.19:8088/v1
 ```
 
 ### LiteLLM Proxy Config for Mem0 Integration
@@ -121,7 +121,7 @@ model_list:
   - model_name: qwen3-35b
     litellm_params:
       model: openai/qwen3-35b
-      api_base: http://10.100.20.19:8080/v1
+      api_base: http://10.100.20.19:8088/v1
 
   # Mem0 embedder (small, mac-mini Ollama)
   - model_name: nomic-embed-text
@@ -133,7 +133,7 @@ model_list:
   - model_name: qwen3.6
     litellm_params:
       model: openai/qwen3-35b
-      api_base: http://10.100.20.19:8080/v1
+      api_base: http://10.100.20.19:8088/v1
 
 router:
   allowed_fails: 3
@@ -147,11 +147,13 @@ router:
 
 **Request queuing:** LiteLLM itself does not queue at the proxy level (OSS version). Queuing happens at the backend: llama-server has a slot system (`--slots N`) and holds excess requests internally until a slot frees. With 3 runners each configured with `--slots 4`, you get 12 concurrent requests before anyone waits — the runners absorb the back-pressure, clients see latency not errors. LiteLLM's `num_retries` is for backend failure retry, not saturation queuing.
 
-**Adding a new runner:** Add a new `model_list` entry pointing to the new runner's endpoint. Update the ConfigMap, push to gitops. ArgoCD syncs and LiteLLM hot-reloads the config — no pod restart required.
+**Adding a new runner:** Add a new `model_list` entry pointing to the new runner's endpoint. Update the ConfigMap, push to gitops. Reloader detects the ConfigMap change and triggers a rolling restart automatically — no manual intervention required.
 
-## Ready Conditions for Phase 1
+**Hot-reload mechanism:** Deployment has `configmap.reloader.stakater.com/reload: "litellm-config"` annotation. Stakater Reloader watches for ConfigMap changes and triggers a rolling restart. The restart picks up the new config fresh. LiteLLM itself doesn't poll the config file — the restart is the reload.
 
-1. `https://litellm.amer.dev/v1/chat/completions` responds with a valid OpenAI-format response
-2. murderbot llama-server is accessible at `http://10.100.20.19:8080/v1` through LiteLLM (not directly — all agent traffic goes through the proxy)
-3. A test call to `litellm.amer.dev/v1/chat/completions` with model `qwen3-35b` returns a response within expected latency
-4. ConfigMap hot-reload works: change a model_list entry, push to gitops, verify LiteLLM picks it up without pod restart
+## Ready Conditions for Phase 1 — STATUS: COMPLETE ✅
+
+1. ✅ `https://litellm.amer.dev/v1/chat/completions` responds with a valid OpenAI-format response
+2. ✅ murderbot llama-server accessible at `http://10.100.20.19:8088/v1` through LiteLLM (port 8080 blocked; 8088 is permanent)
+3. ✅ Test call with model `qwen3-35b` returns a response within expected latency
+4. ✅ ConfigMap change → Reloader auto-restarts pod → new config active (Reloader annotation added)
