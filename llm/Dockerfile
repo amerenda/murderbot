@@ -11,6 +11,13 @@ ARG LLAMA_CPP_REF=b9292
 WORKDIR /build
 RUN git clone --depth 1 --branch ${LLAMA_CPP_REF} https://github.com/ggml-org/llama.cpp .
 
+# The devel image has CUDA stubs but no real driver. Create the versioned symlink
+# so the linker can resolve libcuda at build time; the real driver is injected at
+# runtime by the NVIDIA container runtime.
+RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
+
+ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LIBRARY_PATH:-}
+
 RUN cmake -B build \
         -DGGML_CUDA=ON \
         -DCMAKE_CUDA_ARCHITECTURES="120a-real" \
