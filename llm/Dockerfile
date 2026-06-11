@@ -31,9 +31,14 @@ FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libcurl4 curl \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/build/bin/llama-server /usr/local/bin/llama-server
+# llama-server links against several .so files built alongside it; copy them all
+# and register with ldconfig so the dynamic linker finds them at runtime.
+COPY --from=builder /build/build/bin/ /opt/llama/bin/
+RUN echo "/opt/llama/bin" > /etc/ld.so.conf.d/llama.conf && ldconfig && \
+    ln -s /opt/llama/bin/llama-server /usr/local/bin/llama-server
 
 WORKDIR /app
 COPY templates/froggeric-v20.jinja templates/froggeric-v20.jinja
