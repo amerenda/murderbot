@@ -13,7 +13,7 @@ A multi-agent platform where different agents collaborate on tasks, share memory
 | Inference + queue | LiteLLM | No | k3s |
 | Dispatch + triggers + tracking | Hatchet (Lite) | No (state in PG) | k3s |
 | Agent harness + orchestration | PydanticAI + Pydantic Graph | No | inside Hatchet workers on k3s |
-| Cross-session memory | Mem0 server | No (state in Qdrant + PG) | k3s |
+| Cross-session memory | Mem0 server | No (state in PG via pgvector) | k3s |
 | Vector store | Qdrant | **Yes** | Mac Mini — core stack |
 | Relational state | PostgreSQL | **Yes** | Mac Mini — core stack (existing) |
 
@@ -45,12 +45,12 @@ The "dispatcher" is now Hatchet. Writing one is off the table.
 - Stateless — fits naturally inside a Hatchet worker
 - V1 stable API (Sep 2025), MIT licensed
 
-### Mem0 + Qdrant
+### Mem0 + pgvector
 
-- Qdrant: stateful vector store, Docker on Mac Mini core stack
-- Mem0: stateless server on k3s, backed by Qdrant + PostgreSQL
+- Mem0: stateless server on k3s, backed by PostgreSQL with pgvector extension
+- The mem0 OSS REST server hardcodes pgvector as its vector store — no Qdrant env vars exist in the server
 - All agents hit one Mem0 HTTP endpoint — concurrent writes handled by Mem0
-- MCP server available: agents use `search_memory`/`add_memory` as native tools
+- Qdrant (Phase 2) remains deployed on Mac Mini for future agents that need direct vector search
 - No Neo4j (Graphiti ruled out — requires Neo4j v5.26+)
 
 ## Trigger Architecture
@@ -87,7 +87,8 @@ External events
                  LiteLLM              Mem0
                 (inference)          (memory)
                      │                   │
-            Model containers          Qdrant
+            Model containers        pgvector
+                                  (in Mac Mini PG)
 ```
 
 ### How triggers work in Hatchet
@@ -111,7 +112,7 @@ External events
 New Deployments:
 - **LiteLLM** — inference gateway
 - **Hatchet Lite** — dispatch engine, UI, cron, webhooks (points at Mac Mini PG)
-- **Mem0 server** — memory API (points at Mac Mini Qdrant + PG)
+- **Mem0 server** — memory API (points at Mac Mini PG via pgvector)
 - **Agent workers** — one Deployment per agent type, pull tasks from Hatchet
 
 ## Phases Overview
