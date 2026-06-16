@@ -105,7 +105,7 @@ case "$MODEL_VARIANT" in
     MODEL_DISPLAY="Qwen3.6-35B (no-MTP, stable)"
     MTP_ENABLE=false
     NGL="${NGL:-41}"
-    CTX="${CTX:-32768}"
+    CTX="${CTX:-131072}"
     REPEAT_PENALTY=1.1
     ;;
   qwen36-mtp)
@@ -196,7 +196,7 @@ CTV="q4_0"
 BATCH="${BATCH:-512}"
 THREADS="${THREADS:-6}"
 HOST="0.0.0.0"
-PORT="${PORT:-8080}"
+PORT="${PORT:-8088}"
 PARALLEL=1
 VERBOSE="${VERBOSE:-false}"
 
