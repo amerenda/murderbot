@@ -43,5 +43,5 @@ One large read consumes 15% of the session and can push the next request over th
 - **Host:** murderbot — NVIDIA RTX 4000 Blackwell, 24 GB VRAM, Linux
 - **Inference:** llama.cpp llama-server on `http://127.0.0.1:8088`
 - **Model:** Qwen3.6-35B-A3B (--reasoning off, no thinking mode)
-- **Context window:** 32768 tokens (opencode limit; server supports 131072)
+- **Context window:** 131072 tokens (both opencode and server)
 - **Max output:** 4096 tokens per turn
