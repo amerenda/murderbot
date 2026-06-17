@@ -1,0 +1,17 @@
+[Unit]
+Description=llama-server VRAM guardian and stall watchdog
+Documentation=https://github.com/amerenda/murderbot
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/llama-watchdog.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=llama-watchdog
+
+[Install]
+WantedBy=multi-user.target
