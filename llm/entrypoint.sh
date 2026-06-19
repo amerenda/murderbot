@@ -11,6 +11,7 @@ HOST="${HOST:-0.0.0.0}"
 BATCH="${BATCH:-512}"
 THREADS="${THREADS:-6}"
 REPEAT_PENALTY="${REPEAT_PENALTY:-1.1}"
+CACHE_REUSE="${CACHE_REUSE:-256}"
 VERBOSE="${VERBOSE:-false}"
 MTP_ENABLE="${MTP_ENABLE:-false}"
 MTP_N_MAX="${MTP_N_MAX:-2}"
@@ -42,7 +43,8 @@ SERVER_ARGS=(
     --jinja
     --chat-template-file /app/templates/froggeric-v20.jinja
     --chat-template-kwargs '{"auto_disable_thinking_with_tools": true, "max_tool_response_chars": 3000, "preserve_thinking": false}'
-    --cache-ram 0
+    --cache-ram     0
+    --cache-reuse   "$CACHE_REUSE"
     --metrics
     --timeout       0
     --parallel      1
