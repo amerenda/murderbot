@@ -339,6 +339,7 @@ if ! pgrep -f "llama-server" > /dev/null 2>&1; then
     --metrics
     --timeout       0
     --parallel      "$PARALLEL"
+    --cache-reuse   256
     --repeat-penalty "$REPEAT_PENALTY"
     --temp   0.6
     --top-k  20
