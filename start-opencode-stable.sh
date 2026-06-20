@@ -336,6 +336,9 @@ if ! pgrep -f "llama-server" > /dev/null 2>&1; then
     --jinja
     --chat-template-file "$SCRIPT_DIR/templates/froggeric-v20.jinja"
     --chat-template-kwargs '{"auto_disable_thinking_with_tools": true, "max_tool_response_chars": 3000, "preserve_thinking": false}'
+    # Note: auto_disable_thinking_with_tools only suppresses thinking when < 3 tool results
+    # are present in the conversation (template v20 logic). Once 3+ tool results accumulate,
+    # thinking re-enables automatically so the model can synthesize complex research output.
     --metrics
     --timeout       0
     --parallel      "$PARALLEL"

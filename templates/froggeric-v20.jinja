@@ -8,8 +8,14 @@
 {%- set max_tool_arg_chars = max_tool_arg_chars if max_tool_arg_chars is defined else 0 %}
 {%- set max_tool_response_chars = max_tool_response_chars if max_tool_response_chars is defined else 0 %}
 {%- set _has_tools = (tools is defined and tools and tools is iterable and tools is not mapping) %}
+{%- set _tool_result_count = namespace(value=0) %}
+{%- for _m in messages %}
+    {%- if _m.role == 'tool' %}
+        {%- set _tool_result_count.value = _tool_result_count.value + 1 %}
+    {%- endif %}
+{%- endfor %}
 {%- set ns_state = namespace(thinking=enable_thinking) %}
-{%- if auto_disable_thinking_with_tools and _has_tools %}
+{%- if auto_disable_thinking_with_tools and _has_tools and _tool_result_count.value < 3 %}
     {%- set ns_state.thinking = false %}
 {%- endif %}
 {%- macro render_content(content, do_vision_count, is_system_content=false) %}
