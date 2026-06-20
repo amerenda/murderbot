@@ -27,6 +27,7 @@ import os
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -473,6 +474,236 @@ def test_clean_history_passthru(verbose=False):
     return r.ok(f"200 OK, finish={finish}")
 
 
+# ── Stress tests ─────────────────────────────────────────────────────────────
+
+def stress_repeat(n=5, verbose=False):
+    """Run the full regression suite N times and report per-test pass rates."""
+    print(f"[stress:repeat] Running full suite {n} times\n")
+    counts = {name: {"pass": 0, "fail": 0} for name in TESTS}
+    t0 = time.time()
+
+    for i in range(n):
+        print(f"  Round {i+1}/{n}")
+        for name, fn in TESTS.items():
+            try:
+                r = fn(verbose=False)
+            except Exception as e:
+                r = TestResult(name)
+                r.fail(f"exception: {e}")
+            status = "PASS" if r.passed else "FAIL"
+            counts[name]["pass" if r.passed else "fail"] += 1
+            print(f"    {name}: {status}  {r.message}")
+        print()
+
+    elapsed = time.time() - t0
+    print(f"Results after {n} rounds ({elapsed:.0f}s total):")
+    all_ok = True
+    for name, c in counts.items():
+        rate = c["pass"] / n * 100
+        flag = "" if c["fail"] == 0 else f"  ← {c['fail']} FAILURE(S)"
+        print(f"  {name}: {c['pass']}/{n} ({rate:.0f}%){flag}")
+        if c["fail"]:
+            all_ok = False
+    return all_ok
+
+
+def stress_deep_loop(turns=40, verbose=False):
+    """
+    Single session: 40 tool calls with no forced synthesis cutoff.
+    Verifies no 400/500 fires regardless of history length.
+    """
+    print(f"[stress:deep-loop] {turns} tool calls, no synthesis cutoff\n")
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a research assistant. Keep searching for more information. "
+                "Call search_web repeatedly with different queries about Python. "
+                "Do not stop until instructed."
+            ),
+        },
+        {"role": "user", "content": "Search for everything you can find about Python."},
+    ]
+
+    errors = []
+    tool_call_count = 0
+    t0 = time.time()
+
+    for turn in range(turns + 5):
+        resp = completion(messages, tools=MOCK_TOOLS)
+        if resp.status_code != 200:
+            errors.append(f"turn {turn+1}: HTTP {resp.status_code}")
+            print(f"  turn {turn+1}: HTTP {resp.status_code} ERROR")
+            break
+
+        data   = resp.json()
+        choice = data["choices"][0]
+        msg    = choice["message"]
+        finish = choice["finish_reason"]
+        messages.append(msg)
+
+        tc_count = len(msg.get("tool_calls") or [])
+        if verbose:
+            print(f"  turn {turn+1}: finish={finish} tool_calls={tc_count} "
+                  f"total_calls={tool_call_count} history_len={len(messages)}")
+        else:
+            print(f"  turn {turn+1}: finish={finish} tool_calls={tc_count} "
+                  f"total_calls={tool_call_count}", flush=True)
+
+        if finish == "stop" or finish != "tool_calls":
+            break
+
+        tool_calls = msg.get("tool_calls") or []
+        for tc in tool_calls:
+            fn   = tc["function"]["name"]
+            args = tc["function"].get("arguments", "{}")
+            result = MOCK_TOOL_RESULTS.get(fn, "mock result")
+            tool_call_count += 1
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": f"[call {tool_call_count}] {result}",
+            })
+
+        if tool_call_count >= turns:
+            print(f"\n  Reached {turns} tool calls — forcing synthesis turn")
+            resp2 = completion(messages, tools=None)
+            status = resp2.status_code
+            finish2 = resp2.json()["choices"][0]["finish_reason"] if status == 200 else "error"
+            print(f"  Synthesis turn: HTTP {status}, finish={finish2}")
+            if status != 200:
+                errors.append(f"synthesis turn: HTTP {status}")
+            break
+
+    elapsed = time.time() - t0
+    print(f"\n  Completed {tool_call_count} tool calls in {elapsed:.1f}s")
+    if errors:
+        print(f"  FAILURES: {errors}")
+        return False
+    print(f"  No errors — {tool_call_count} calls, zero 400/500s")
+    return True
+
+
+def _run_one_session(session_id, prompt):
+    """Worker for concurrent stress test."""
+    t0 = time.time()
+    turns, finish, text, err = drive_tool_session(prompt, max_turns=12)
+    elapsed = time.time() - t0
+    ok = finish == "stop" and not err
+    return session_id, ok, turns, finish, err, elapsed
+
+
+def stress_concurrent(n=4, verbose=False):
+    """
+    Fire N sessions in parallel. Verifies the server handles concurrent
+    tool-calling sessions without errors.
+    """
+    print(f"[stress:concurrent] {n} parallel sessions\n")
+    prompts = [
+        "What is Python? Search and summarize.",
+        "Search for information about machine learning frameworks.",
+        "Find facts about Linux operating system history.",
+        "Research the history of the internet.",
+        "What is Kubernetes? Search for information.",
+        "Find information about Rust programming language.",
+        "Search for Python web frameworks.",
+        "Research GPU computing and CUDA.",
+    ][:n]
+
+    t0 = time.time()
+    results = []
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        futures = {pool.submit(_run_one_session, i, p): i for i, p in enumerate(prompts)}
+        for fut in as_completed(futures):
+            sid, ok, turns, finish, err, elapsed = fut.result()
+            results.append((sid, ok, turns, finish, err, elapsed))
+            status = "OK" if ok else "FAIL"
+            print(f"  session {sid}: {status}  {turns} turns  finish={finish}  {elapsed:.1f}s"
+                  + (f"  err={err}" if err else ""))
+
+    elapsed = time.time() - t0
+    passed = sum(1 for _, ok, *_ in results if ok)
+    print(f"\n  {passed}/{n} sessions completed successfully in {elapsed:.1f}s total")
+    return passed == n
+
+
+def stress_large_payload(verbose=False):
+    """
+    Tool responses near max_tool_response_chars (3000 chars) to exercise
+    the token-budget stripping code paths in the LiteLLM hook.
+    """
+    print("[stress:large-payload] Large tool responses + multi-turn\n")
+
+    # Build a big result (~2900 chars) that won't trigger truncation but is large
+    big_chunk = "Python information: " + ("x" * 100 + " ") * 28  # ~2900 chars
+    # And one that exceeds the limit to force server-side truncation
+    huge_chunk = "Python information: " + ("x" * 100 + " ") * 60  # ~6100 chars
+
+    messages = [
+        {"role": "system", "content": "You are a research assistant. Use tools, then summarize."},
+        {"role": "user", "content": "Search for Python information."},
+    ]
+
+    errors = []
+    call_id = f"call_{uuid.uuid4().hex[:8]}"
+    t0 = time.time()
+
+    # Turn 1: send a large (but under-limit) result
+    resp = completion(messages, tools=MOCK_TOOLS)
+    if resp.status_code != 200:
+        print(f"  Turn 1 req: HTTP {resp.status_code}")
+        return False
+    msg = resp.json()["choices"][0]["message"]
+    messages.append(msg)
+    if msg.get("tool_calls"):
+        tc = msg["tool_calls"][0]
+        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": big_chunk})
+        print(f"  Turn 1: tool call → {len(big_chunk)}-char response sent")
+    else:
+        print(f"  Turn 1: model skipped tool call (finish={resp.json()['choices'][0]['finish_reason']})")
+
+    # Turn 2: send a huge result (exceeds max_tool_response_chars=3000 — template truncates it)
+    resp2 = completion(messages, tools=MOCK_TOOLS)
+    if resp2.status_code != 200:
+        print(f"  Turn 2 req: HTTP {resp2.status_code}")
+        errors.append(f"turn 2: HTTP {resp2.status_code}")
+    else:
+        msg2 = resp2.json()["choices"][0]["message"]
+        messages.append(msg2)
+        if msg2.get("tool_calls"):
+            tc2 = msg2["tool_calls"][0]
+            messages.append({"role": "tool", "tool_call_id": tc2["id"], "content": huge_chunk})
+            print(f"  Turn 2: tool call → {len(huge_chunk)}-char response sent (will be truncated by template)")
+        else:
+            print(f"  Turn 2: model synthesized early (finish={resp2.json()['choices'][0]['finish_reason']})")
+
+    # Turn 3: force synthesis (no tools)
+    resp3 = completion(messages, tools=None)
+    elapsed = time.time() - t0
+    if resp3.status_code != 200:
+        errors.append(f"synthesis turn: HTTP {resp3.status_code}")
+        print(f"  Turn 3 (synthesis): HTTP {resp3.status_code}")
+    else:
+        finish3 = resp3.json()["choices"][0]["finish_reason"]
+        content3 = resp3.json()["choices"][0]["message"].get("content", "")
+        print(f"  Turn 3 (synthesis): HTTP 200, finish={finish3}, {len(content3)} chars")
+
+    print(f"\n  Completed in {elapsed:.1f}s")
+    if errors:
+        print(f"  FAILURES: {errors}")
+        return False
+    print("  No errors — large payloads handled correctly")
+    return True
+
+
+STRESS_TESTS = {
+    "repeat":       stress_repeat,
+    "deep-loop":    stress_deep_loop,
+    "concurrent":   stress_concurrent,
+    "large-payload": stress_large_payload,
+}
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 TESTS = {
@@ -488,21 +719,66 @@ TESTS = {
 
 def main():
     parser = argparse.ArgumentParser(description="qwen3-35b-think tool calling regression tests")
-    parser.add_argument("--test", help="Run a single test by name")
+    parser.add_argument("--test",   help="Run a single regression test by name")
+    parser.add_argument("--stress", help=(
+        "Run a stress scenario: repeat, deep-loop, concurrent, large-payload  "
+        "(or 'all' for all four)"
+    ))
+    parser.add_argument("--repeat-n",    type=int, default=5,  metavar="N",
+                        help="Rounds for --stress repeat (default 5)")
+    parser.add_argument("--loop-turns",  type=int, default=40, metavar="N",
+                        help="Tool calls for --stress deep-loop (default 40)")
+    parser.add_argument("--concurrent-n", type=int, default=4, metavar="N",
+                        help="Parallel sessions for --stress concurrent (default 4)")
     parser.add_argument("--verbose", "-v", action="store_true")
-    parser.add_argument("--list", action="store_true", help="List test names")
+    parser.add_argument("--list", action="store_true", help="List test/stress names")
     args = parser.parse_args()
 
     if args.list:
+        print("Regression tests:")
         for name in TESTS:
-            print(name)
+            print(f"  {name}")
+        print("\nStress scenarios:")
+        for name in STRESS_TESTS:
+            print(f"  {name}")
         return
 
-    tests_to_run = {args.test: TESTS[args.test]} if args.test else TESTS
+    # ── Stress mode ──
+    if args.stress:
+        which = list(STRESS_TESTS.keys()) if args.stress == "all" else [args.stress]
+        for s in which:
+            if s not in STRESS_TESTS:
+                print(f"Unknown stress scenario: {s}. Available: {', '.join(STRESS_TESTS)}")
+                sys.exit(1)
 
+        print(f"Stress testing against {LITELLM_URL} model={MODEL}\n")
+        ok = True
+        for s in which:
+            fn = STRESS_TESTS[s]
+            print(f"{'='*60}")
+            kwargs = {}
+            if s == "repeat":
+                kwargs["n"] = args.repeat_n
+            elif s == "deep-loop":
+                kwargs["turns"] = args.loop_turns
+            elif s == "concurrent":
+                kwargs["n"] = args.concurrent_n
+            try:
+                result = fn(verbose=args.verbose, **kwargs)
+            except Exception as e:
+                print(f"  EXCEPTION: {e}")
+                result = False
+            ok = ok and result
+            print()
+
+        sys.exit(0 if ok else 1)
+
+    # ── Regression mode ──
     if args.test and args.test not in TESTS:
         print(f"Unknown test: {args.test}. Available: {', '.join(TESTS)}")
         sys.exit(1)
+
+    tests_to_run = {args.test: TESTS[args.test]} if args.test else TESTS
 
     print(f"Running {len(tests_to_run)} test(s) against {LITELLM_URL} model={MODEL}\n")
 
