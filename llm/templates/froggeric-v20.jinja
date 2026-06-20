@@ -15,7 +15,7 @@
     {%- endif %}
 {%- endfor %}
 {%- set ns_state = namespace(thinking=enable_thinking) %}
-{%- if auto_disable_thinking_with_tools and _has_tools and _tool_result_count.value < 6 %}
+{%- if auto_disable_thinking_with_tools and _has_tools %}
     {%- set ns_state.thinking = false %}
 {%- endif %}
 {%- macro render_content(content, do_vision_count, is_system_content=false) %}
