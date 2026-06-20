@@ -43,7 +43,7 @@ SERVER_ARGS=(
     --jinja
     --chat-template-file /app/templates/froggeric-v20.jinja
     --chat-template-kwargs '{"auto_disable_thinking_with_tools": true, "max_tool_response_chars": 3000, "preserve_thinking": false}'
-    --reasoning-budget 1500
+    --reasoning-budget 8192
     --cache-ram     0
     --cache-reuse   "$CACHE_REUSE"
     --metrics
