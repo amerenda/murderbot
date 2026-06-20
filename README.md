@@ -1,19 +1,31 @@
 # murderbot
 
-Scripts and tooling for running local LLMs on murderbot (NVIDIA RTX 4000 Blackwell, 24 GB VRAM).
+Scripts, templates, and Docker image source for running local LLMs on murderbot (NVIDIA RTX 4000 Blackwell, 24 GB VRAM).
 
 ## Stack
 
 ```
-opencode → llama-proxy (:8089) → llama-server (:8088) → GPU
+opencode → llama-proxy (:8089) → llama-server (:8088, Docker/Komodo) → GPU
 ```
 
-- **Inference**: [llama.cpp](https://github.com/ggerganov/llama.cpp) built from source (`~/claude/llama.cpp`, CUDA 12.8, sm_120a)
+- **Inference**: [llama.cpp](https://github.com/ggerganov/llama.cpp) compiled into `amerenda/murderbot-llm` Docker image (`llm/Dockerfile`, CUDA 12.8, sm_120a)
+- **Deployment**: Komodo manages the container via `komodo-dean-gitops/murderbot/llm/compose.yaml`
 - **Model**: Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf — MoE, ~21 GB on GPU
+- **Template**: `llm/templates/froggeric-v20.jinja` — baked into the image at `/app/templates/`
 - **Agent**: [opencode](https://opencode.ai) — coding agent harness
 - **Proxy**: `llama-proxy.py` — context overflow recovery (see below)
 
-## Quick start
+## Production deployment
+
+The llama-server container is managed by **Komodo** — not the shell scripts in this repo.
+
+- Compose spec: [`komodo-dean-gitops/murderbot/llm/compose.yaml`](https://github.com/amerenda/komodo-dean-gitops)
+- Image: `amerenda/murderbot-llm:latest` (built from `llm/Dockerfile` in this repo)
+- To update server flags or the Jinja template: edit `llm/entrypoint.sh` or `llm/templates/froggeric-v20.jinja`, build and push a new image, then restart the Komodo stack
+
+## Local dev / opencode
+
+`start-opencode-stable.sh` is for local development — it runs llama-server directly (not via Docker) and wires up opencode:
 
 ```bash
 ./start-opencode-stable.sh                   # default: Qwen3.6-35B, 196K context
@@ -87,11 +99,12 @@ Models live at `/mnt/storage/models/llms/`.
 
 KV cache uses `q4_0` quantization (`-ctk q4_0 -ctv q4_0`).
 
-## Key flags
+## Key flags (llm/entrypoint.sh)
 
-- `--reasoning off` — disables Qwen3 thinking mode. Without this the model generates reasoning text before `<tool_call>` and the parser fails.
-- `--jinja` — uses the GGUF-embedded Unsloth-patched Jinja template (includes `enable_thinking`, `preserve_thinking`, `developer` role fixes).
+- `--jinja --chat-template-file /app/templates/froggeric-v20.jinja` — uses the froggeric-v20 template baked into the image instead of the GGUF-embedded one.
+- `--chat-template-kwargs '{"auto_disable_thinking_with_tools": true, ...}'` — suppresses `<think>` blocks during initial tool-selection rounds; re-enables thinking once ≥3 tool results have accumulated so the model can synthesize complex output.
 - Flash attention (`-fa 1`) — enabled for performance.
+- `-ctk q4_0 -ctv q4_0` — KV cache quantization to reduce VRAM usage.
 
 ## Other scripts
 
@@ -107,8 +120,10 @@ KV cache uses `q4_0` quantization (`-ctk q4_0 -ctv q4_0`).
 
 | File | Notes |
 |------|-------|
-| `start-opencode-stable.sh` | **Main launcher** — use this |
-| `start-opencode.sh` | Original launcher — do not modify |
+| `llm/Dockerfile` | Builds `amerenda/murderbot-llm` image — compiled llama-server for SM_120a |
+| `llm/entrypoint.sh` | Container entry point — server flags, model path, template kwargs |
+| `llm/templates/froggeric-v20.jinja` | **Active template** — baked into the image at build time |
+| `start-opencode-stable.sh` | Local dev launcher — runs llama-server directly (not Docker) |
 | `llama-proxy.py` | Overflow recovery proxy |
-| `qwen36-stable.jinja` | Reference copy of GGUF-embedded Jinja template (not used at runtime) |
+| `templates/froggeric-v20.jinja` | Mirror of `llm/templates/` — keep in sync; used by local dev script |
 | `CLAUDE.md` | opencode system instructions — file reading limits, tool discipline |
