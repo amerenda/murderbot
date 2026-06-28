@@ -2,7 +2,7 @@
 # start-opencode-stable.sh — Qwen3.6 + llama.cpp (native tool calling)
 #
 # Architecture:
-#   opencode → LiteLLM (https://litellm.amer.dev/v1)  → llama-server (port 8088)
+#   opencode → LiteLLM ($LITELLM_BASE_URL /v1)  → llama-server (port 8088)
 #   opencode → llama-server (port 8088, local fallback when LiteLLM key absent)
 #
 # Key flags:
@@ -42,16 +42,11 @@
 # Usage:
 #   ./start-opencode-stable.sh                              # default: Qwen3.6-35B (no MTP)
 #   ./start-opencode-stable.sh --model qwen36-mtp           # MTP variant for speed
-#   ./start-opencode-stable.sh --model qwen3-coder-next     # coding-focused model
-#   ./start-opencode-stable.sh --restart                    # stop existing server first
+#   ./start-opencode-stable.sh --model qwen3-coder-next     # coding-focused, IQ3 quant
+#   LITELLM_BASE_URL=https://my-litellm.example.com/v1 \    # custom LiteLLM endpoint
+#     ./start-opencode-stable.sh
 #
-# Env overrides:
-#   CTX=196608 ./start-opencode-stable.sh                  # larger context (GPU has headroom up to ~229K)
-#   CTX=65536 ./start-opencode-stable.sh                   # smaller context (saves VRAM)
-#   NGL=38 ./start-opencode-stable.sh                      # fewer GPU layers
-#   VERBOSE=true ./start-opencode-stable.sh                # verbose server logging
-#   OPENCODE_RESERVED=80000 ./start-opencode-stable.sh     # less aggressive compaction
-#
+
 # VRAM context headroom (RTX 4000 Blackwell, 24 GB):
 #   NOTE: observed actual free VRAM at CTX 196608 was only ~73 MB (table below is
 #   approximate; model/llama.cpp overhead may vary). NVENC needs ~500 MB for
@@ -70,6 +65,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ─── DEFAULTS ────────────────────────────────────────────────────────────────
 MODEL_VARIANT="qwen36"
 RESTART=false
+
+# LiteLLM endpoint — configurable, defaults to amer.dev proxy
+LITELLM_BASE_URL="${LITELLM_BASE_URL:-https://litellm.amer.dev/v1}"
 
 # ─── CLI ARG PARSING ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -98,60 +96,60 @@ case "$MODEL_VARIANT" in
     MODEL_DISPLAY="Qwen3.6-35B (no-MTP, stable)"
     MTP_ENABLE=false
     NGL="${NGL:-41}"
-    CTX="${CTX:-131072}"
-    REPEAT_PENALTY=1.1
-    ;;
+    CTX="${CTX:-131072}" ;;
   qwen36-mtp)
     MODEL="${MODELS_DIR}/qwen36/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf"
-    MODEL_DISPLAY="Qwen3.6-35B MTP (fast)"
+    MODEL_DISPLAY="Qwen3.6-35B (MTP, speculative)"
     MTP_ENABLE=true
-    NGL="${NGL:-99}"
-    CTX="${CTX:-131072}"
-    REPEAT_PENALTY=1.1
-    ;;
+    NGL="${NGL:-41}"
+    CTX="${CTX:-131072}" ;;
   qwen3-coder-next)
     MODEL="${MODELS_DIR}/qwen3-coder-next/Qwen3-Coder-Next-UD-IQ3_XXS.gguf"
-    MODEL_DISPLAY="Qwen3-Coder-Next UD-IQ3_XXS"
+    MODEL_DISPLAY="Qwen3-Coder-Next (IQ3, coding)"
     MTP_ENABLE=false
-    NGL="${NGL_CODER:-${NGL:-40}}"
-    CTX="${CTX:-32768}"
-    REPEAT_PENALTY=1.0
-    ;;
-  *)
-    echo "ERROR: Unknown --model '$MODEL_VARIANT'. Use: qwen36, qwen36-mtp, qwen3-coder-next" >&2
-    exit 1 ;;
+    NGL="${NGL:-40}"
+    CTX="${CTX:-32768}" ;;
+  *) echo "ERROR: Unknown model variant '$MODEL_VARIANT'" >&2; exit 1 ;;
 esac
 
-# ─── OPENCODE TOKEN BUDGET ───────────────────────────────────────────────────
-OPENCODE_CTX="${OPENCODE_CTX:-${CTX}}"
-OPENCODE_OUTPUT="${OPENCODE_OUTPUT:-8192}"
-OPENCODE_RESERVED="${OPENCODE_RESERVED:-85000}"
+# ─── OPENCODE CONTEXT SIZING ─────────────────────────────────────────────────
+# Reserve tokens for system prompt, thinking blocks, tool responses.
+# OpenCode context = server CTX minus a safety margin so the model never
+# hits the wall mid-generation (which causes silent truncation).
+OPENCODE_CTX=$((CTX - 32768))
+OPENCODE_OUTPUT=16384
+OPENCODE_RESERVED="${OPENCODE_RESERVED:-8192}"
 
-MODEL_NAME="$(basename "$MODEL")"
+MODEL_NAME=$(basename "$MODEL" | sed 's/\.gguf$//')
+PROXY_PORT=8089
 
-# ─── SERVER BINARY ───────────────────────────────────────────────────────────
-SERVER="$HOME/claude/llama.cpp/build/bin/llama-server"
-if [ ! -x "$SERVER" ]; then
-  echo "ERROR: llama-server not found at $SERVER" >&2
-  echo "  Rebuild: cd ~/claude/llama.cpp && cmake --build build -j\$(nproc)" >&2
+# ─── SERVER CONTEXT SIZING ───────────────────────────────────────────────────
+# Context tokens for llama-server (the GGUF model's native limit).
+# This is what the server advertises — OpenCode will use OPENCODE_CTX below.
+SERVER_CTX="${CTX}"
+
+# ─── VRAM HEADROOM CHECK ─────────────────────────────────────────────────────
+if [ "$OPENCODE_CTX" -gt 229376 ]; then
+  echo "WARNING: CTX=$OPENCODE_CTX may be too aggressive — free VRAM could hit zero." >&2
+fi
+
+# ─── ENVIRONMENT OVERRIDES ───────────────────────────────────────────────────
+NGL="${NGL:-41}"
+CTX="${CTX:-$SERVER_CTX}"
+PORT="${PORT:-8088}"
+
+if [ "$OPENCODE_CTX" -le 0 ]; then
+  echo "ERROR: OPENCODE_CTX would be non-positive (CTX=$CTX)." >&2
   exit 1
 fi
 
-# ─── MODEL FILE CHECK ────────────────────────────────────────────────────────
-if [ ! -f "$MODEL" ]; then
-  echo "ERROR: Model file not found: $MODEL" >&2
-  exit 1
-fi
+echo "Model:      $MODEL_DISPLAY"
+echo "VRAM CTX:   $SERVER_CTX tokens"
+echo "OpenCode CTX: $OPENCODE_CTX tokens  max-output: $OPENCODE_OUTPUT"
+echo "LiteLLM:    ${LITELLM_BASE_URL} (set LITELLM_BASE_URL to override)"
+echo ""
 
-# ─── OPENCODE CHECK / INSTALL ────────────────────────────────────────────────
-if ! command -v opencode &>/dev/null; then
-  echo "OpenCode not found. Installing via npm to ~/.local..."
-  npm install -g opencode-ai --prefix ~/.local
-  export PATH="$HOME/.local/bin:$PATH"
-  echo "OpenCode installed."
-fi
-
-# ─── SERVER CONFIG ───────────────────────────────────────────────────────────
+# ─── SERVER ARGS ─────────────────────────────────────────────────────────────
 FA=1
 CTK="q4_0"
 CTV="q4_0"
@@ -222,56 +220,18 @@ if [ -f "$BASE_LOG" ]; then
   LOG_SIZE_MB=$(( $(stat -c%s "$BASE_LOG") / 1024 / 1024 ))
   if [ "$LOG_SIZE_MB" -ge "$LOG_MAX_MB" ]; then
     for i in $(seq $((LOG_KEEP - 1)) -1 1); do
-      [ -f "${BASE_LOG}.${i}" ] && mv "${BASE_LOG}.${i}" "${BASE_LOG}.$((i + 1))"
+      cp "$BASE_LOG.$i" "$BASE_LOG.$((i + 1))" 2>/dev/null || true
     done
-    mv "$BASE_LOG" "${BASE_LOG}.1"
-    echo "Rotated log (was ${LOG_SIZE_MB} MB) → ${BASE_LOG}.1"
+    : > "$BASE_LOG.1"
+    echo "Rotated log ($LOG_SIZE_MB MB → $LOG_MAX_MB MB threshold)." >&2
   fi
 fi
 
-# ─── CHECK FOR EXISTING SERVER ───────────────────────────────────────────────
-if pgrep -f "llama-server" > /dev/null 2>&1; then
-  echo "A llama-server is already running on :$PORT"
-
-  CURRENT_MODEL=$(curl -sf "http://127.0.0.1:$PORT/v1/models" 2>/dev/null \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data'][0]['id'])" 2>/dev/null || true)
-
-  if [ "$(basename "${CURRENT_MODEL:-}")" = "$MODEL_NAME" ]; then
-    echo "Already serving $MODEL_NAME — connecting directly."
-  else
-    echo "Server is serving a different model ($(basename "${CURRENT_MODEL:-unknown}"))."
-    echo "Stopping it to load $MODEL_NAME..."
-    stop_server
-    echo "Waiting for VRAM to drain..."
-    sleep 5
-  fi
-fi
-
-# ─── FREE VRAM (stop ComfyUI if running) ─────────────────────────────────────
-if pgrep -f "main\.py --listen|run-tuning-batch\.py|run-flux-batch\.py" > /dev/null 2>&1; then
-  stop_comfyui
-fi
-
-# ─── START LLAMA-SERVER (if not already running) ─────────────────────────────
-if ! pgrep -f "llama-server" > /dev/null 2>&1; then
-  echo "Starting llama-server (stability mode)..."
-  echo "  Model:    $MODEL_NAME"
-  echo "  Display:  $MODEL_DISPLAY"
-  echo "  Template: GGUF embedded (Unsloth-patched, no override)"
-  echo "  Thinking: off during tool calls (auto_disable_thinking_with_tools)"
-  if [ "$MTP_ENABLE" = true ]; then
-    echo "  MTP:      enabled (--spec-type draft-mtp --spec-draft-n-max $MTP_N_MAX)"
-  else
-    echo "  MTP:      disabled"
-  fi
-  echo "  ngl=$NGL  fa=$FA  ctk=$CTK  ctv=$CTV"
-  echo "  ctx=$CTX  repeat_penalty=$REPEAT_PENALTY"
-  echo "  Listen:   http://$HOST:$PORT"
-  echo "  Log:      $BASE_LOG"
-  echo ""
-
-  VERBOSE_FLAG=""
-  [ "$VERBOSE" = "true" ] && VERBOSE_FLAG="--verbose"
+# ─── START LLAMA-SERVER (local fallback) ─────────────────────────────────────
+if [ -z "${LITELLM_MASTER_KEY:-}" ]; then
+  # No LiteLLM key — start llama-server locally as fallback.
+  # This is the original path: opencode → llama-server directly on :8088.
+  echo "No LITELLM_MASTER_KEY set — starting local llama-server (port $PORT)..."
 
   SERVER_ARGS=(
     -m      "$MODEL"
@@ -286,45 +246,49 @@ if ! pgrep -f "llama-server" > /dev/null 2>&1; then
     --host  "$HOST"
     --port  "$PORT"
     --jinja
-    --chat-template-file "$SCRIPT_DIR/templates/froggeric-v20.jinja"
+    --chat-template-file "${SCRIPT_DIR}/templates/froggeric-v20.jinja"
     --chat-template-kwargs '{"auto_disable_thinking_with_tools": true, "max_tool_response_chars": 3000, "preserve_thinking": false}'
-    # Note: auto_disable_thinking_with_tools only suppresses thinking when < 3 tool results
-    # are present in the conversation (template v20 logic). Once 3+ tool results accumulate,
-    # thinking re-enables automatically so the model can synthesize complex research output.
+    --reasoning-budget 8192
+    --cache-ram     0
+    --cache-reuse   "${CACHE_REUSE:-256}"
     --metrics
     --timeout       0
     --parallel      "$PARALLEL"
-    --cache-reuse   256
-    --repeat-penalty "$REPEAT_PENALTY"
+    --repeat-penalty "${REPEAT_PENALTY:-1.1}"
     --temp   0.6
     --top-k  20
     --top-p  0.95
     --min-p  0.05
-    $VERBOSE_FLAG
   )
 
-  if [ "$MTP_ENABLE" = true ]; then
-    SERVER_ARGS+=(--spec-type draft-mtp --spec-draft-n-max "$MTP_N_MAX")
+  if [ "$VERBOSE" = "true" ]; then
+      SERVER_ARGS+=(--verbose)
   fi
 
-  "$SERVER" "${SERVER_ARGS[@]}" >> "$BASE_LOG" 2>&1 &
-  SERVER_PID=$!
-  disown "$SERVER_PID"  # survive terminal SIGHUP
+  if [ "$MTP_ENABLE" = "true" ]; then
+      SERVER_ARGS+=(--spec-type draft-mtp --spec-draft-n-max "$MTP_N_MAX")
+  fi
 
-  # Crash watcher — suppressed if a restart sentinel is present (intentional kill)
+  echo "Starting llama-server: ${SERVER_ARGS[*]}" >&2
+  "${SERVER_ARGS[@]}" > "$BASE_LOG" 2>&1 &
+  SERVER_PID=$!
+
+  # Watchdog — restart server if it dies (keeps the process alive across
+  # transient GPU errors, OOM, etc.)
+  echo "Watchdog PID: $SERVER_PID" >&2
   (
-    while kill -0 "$SERVER_PID" 2>/dev/null; do sleep 5; done
-    if [ -f "$RESTART_SENTINEL" ]; then
-      rm -f "$RESTART_SENTINEL"
-      exit 0
-    fi
-    echo "" >&2
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-    echo "ERROR: llama-server (PID $SERVER_PID) has died!" >&2
-    echo "Last log entries:" >&2
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-    tail -40 "$BASE_LOG" >&2
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    while kill -0 "$SERVER_PID" 2>/dev/null; do
+      sleep 10
+      if [ -f "$RESTART_SENTINEL" ]; then
+        rm -f "$RESTART_SENTINEL"
+        echo "Restart sentinel detected — stopping server..." >&2
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+        break
+      fi
+    done
+    # Server exited — log it and exit (caller will decide what to do)
+    echo "Server ($SERVER_PID) stopped." >&2
   ) &
   WATCHER_PID=$!
 
@@ -362,7 +326,7 @@ AGENT_PROMPT='Proceed with tasks autonomously without stopping mid-task to ask f
 COMPACTION='"auto":true,"prune":true,"reserved":'"${OPENCODE_RESERVED}"
 
 if [ -n "${LITELLM_MASTER_KEY:-}" ]; then
-  # ── LiteLLM path: opencode → https://litellm.amer.dev/v1 ──────────────────
+  # ── LiteLLM path: opencode → $LITELLM_BASE_URL ───────────────────────────────
   OPENCODE_CONFIG_JSON=$(cat << OPENCODE_JSON
 {
   "\$schema": "https://opencode.ai/config.json",
@@ -372,9 +336,9 @@ if [ -n "${LITELLM_MASTER_KEY:-}" ]; then
   "provider": {
     "litellm": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "LiteLLM (litellm.amer.dev)",
+      "name": "LiteLLM proxy",
       "options": {
-        "baseURL": "https://litellm.amer.dev/v1",
+        "baseURL": "${LITELLM_BASE_URL}",
         "apiKey": "${LITELLM_MASTER_KEY}"
       },
       "models": {
@@ -396,14 +360,14 @@ OPENCODE_JSON
   mkdir -p ~/.config/opencode
   echo "$OPENCODE_CONFIG_JSON" > ~/.config/opencode/opencode.json
   echo "OpenCode config ready (LiteLLM mode)"
-  echo "  model:      qwen3-35b via https://litellm.amer.dev/v1"
+  echo "  model:      qwen3-35b via ${LITELLM_BASE_URL}"
   echo "  ctx:        $OPENCODE_CTX tokens  max-output: $OPENCODE_OUTPUT"
   echo "  compact:    auto, reserved=$OPENCODE_RESERVED"
   echo "  perms:      allow (all tool calls auto-approved)"
   echo ""
 
 else
-  # ── Local path: opencode → llama-proxy → llama-server ─────────────────────
+  # ── Local path: opencode → llama-server directly ──────────────────────────────
   OPENCODE_CONFIG_JSON=$(cat << OPENCODE_JSON
 {
   "\$schema": "https://opencode.ai/config.json",

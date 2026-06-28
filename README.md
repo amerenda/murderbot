@@ -5,7 +5,7 @@ Scripts, templates, and Docker image source for running local LLMs on murderbot 
 ## Stack
 
 ```
-opencode → LiteLLM (https://litellm.amer.dev/v1) → llama-server (:8088, Docker/Komodo) → GPU
+opencode → LiteLLM ($LITELLM_BASE_URL /v1) → llama-server (:8088, Docker/Komodo) → GPU
 ```
 
 - **Inference**: [llama.cpp](https://github.com/ggerganov/llama.cpp) compiled into `amerenda/murderbot-llm` Docker image (`llm/Dockerfile`, CUDA 12.8, sm_120a)
@@ -31,12 +31,35 @@ The llama-server container is managed by **Komodo** — not the shell scripts in
 ./start-opencode-stable.sh --restart         # kill existing server first, then start
 ./start-opencode-stable.sh --model qwen36-mtp   # MTP variant (~150 t/s, needs MTP GGUF)
 CTX=229376 ./start-opencode-stable.sh        # larger context (tight but usable, ~0.9 GB free)
+LITELLM_BASE_URL=https://my-litellm.example.com/v1 \  # custom LiteLLM endpoint
+  ./start-opencode-stable.sh
 ```
 
 The script:
-1. Starts `llama-server` on `:8088` (waits until ready)
+1. Starts `llama-server` on `:8088` (waits until ready, only when no LiteLLM key is set)
 2. Writes `~/.config/opencode/opencode.json` pointing at LiteLLM (or direct if key absent)
 3. Launches `opencode`
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LITELLM_BASE_URL` | `https://litellm.amer.dev/v1` | LiteLLM proxy endpoint (OpenAI-compatible). The LiteLLM key is auto-fetched from the k8s secret if `$LITELLM_MASTER_KEY` is unset. |
+| `LITELLM_MASTER_KEY` | *(auto-fetched)* | Master API key for the LiteLLM proxy. Set manually to skip the kubectl lookup. |
+| `CTX` | `131072` (varies by model) | Server context length in tokens. OpenCode uses CTX − 32768 as its own limit. |
+| `OPENCODE_OUTPUT` | `16384` | Maximum output tokens for a single generation. |
+| `OPENCODE_RESERVED` | `8192` | Safety margin subtracted from context so the model never hits the wall mid-generation. |
+
+## Migration: removed llama-proxy.py (overflow proxy)
+
+**What changed:** The local `proxy/llama-proxy.py` process (port 8089) that handled context overflow by splitting long responses has been retired. Context overflow now returns an error to the caller instead of being silently truncated or split.
+
+**Why it was removed:** LiteLLM at `https://litellm.amer.dev/v1` provides a more reliable, centrally-managed inference proxy with built-in retry logic, metrics, and multi-backend routing. Running a local overflow-splitting proxy added complexity for marginal benefit — the template-level `max_tool_response_chars: 3000` in `--chat-template-kwargs` already truncates oversized tool responses at render time.
+
+**What this means for you:**
+- **If you were relying on the proxy for long file reads or large tool outputs**: those will now be truncated at 3000 chars by the template (same behavior as before, but without the split-and-retry loop). If you need larger responses, increase `OPENCODE_OUTPUT` and consider using a local LiteLLM instance that can route to a backend with more context.
+- **If you were using the proxy for context overflow recovery**: the new path is opencode → LiteLLM → llama-server. LiteLLM handles retries automatically; if the server OOMs or drops a connection, LiteLLM retries up to its configured `num_retries`. No manual intervention needed.
+- **To set up your own LiteLLM proxy**: deploy [LiteLLM](https://litellm.vercel.app/) (Docker image `ghcr.io/berriai/litellm:main-stable`) and point `$LITELLM_BASE_URL` at it. The proxy needs a master key passed via the `LITELLM_MASTER_KEY` env var or k8s secret.
 
 ## Models
 
@@ -66,23 +89,19 @@ KV cache uses `q4_0` quantization (`-ctk q4_0 -ctv q4_0`).
 - Flash attention (`-fa 1`) — enabled for performance.
 - `-ctk q4_0 -ctv q4_0` — KV cache quantization to reduce VRAM usage.
 
-## Other scripts
+## Architecture diagram (post-migration)
 
-| Script | Purpose |
-|--------|---------|
-| `start-flux.sh` | Start ComfyUI / FLUX image generation stack |
-| `run-passenger.sh` | Run the Passenger image prompt expansion service |
-| `passenger.py` | Passenger service — Ollama-backed prompt expansion |
-| `run-*.py` | Image generation batch runners (SDXL, lora sweeps, etc.) |
-| `test-prompt.py` | Test prompt strategies against the local LLM |
+```
+opencode ──→ LiteLLM ($LITELLM_BASE_URL /v1) ──→ llama-server (:8088, Docker/Komodo) ──→ GPU
+  │              │
+  │          retries on failure
+  │          Prometheus metrics at /metrics
+```
 
-## Files
+When no `$LITELLM_MASTER_KEY` is available, the script falls back to running `llama-server` locally:
 
-| File | Notes |
-|------|-------|
-| `llm/Dockerfile` | Builds `amerenda/murderbot-llm` image — compiled llama-server for SM_120a |
-| `llm/entrypoint.sh` | Container entry point — server flags, model path, template kwargs |
-| `llm/templates/froggeric-v20.jinja` | **Active template** — baked into the image at build time |
-| `start-opencode-stable.sh` | Local dev launcher — runs llama-server directly (not Docker) |
-| `templates/froggeric-v20.jinja` | Mirror of `llm/templates/` — keep in sync; used by local dev script |
-| `CLAUDE.md` | opencode system instructions — file reading limits, tool discipline |
+```
+opencode ──→ llama-server (:8088, local) ──→ GPU
+```
+
+This fallback path does **not** include any overflow proxy — large responses are truncated at the template level.
