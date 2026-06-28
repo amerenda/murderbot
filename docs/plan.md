@@ -544,7 +544,7 @@ This is also the first app that will be populated in Phases 1–8.
 
 **Goal:** Single inference endpoint for all model calls. opencode and all future agents use one URL. Switching models is a ConfigMap change only.
 
-**Current state:** `opencode → llama-proxy (:8089) → llama-server (:8088 on murderbot) → GPU`
+**Current state:** `opencode → LiteLLM (litellm.amer.dev) → llama-server (:8088 on murderbot) → GPU`
 **After:** `opencode / agents → LiteLLM (k3s, litellm.amer.dev) → llama-server (:8080 on murderbot)`
 
 **Pre-conditions:**
@@ -659,7 +659,7 @@ router_settings:
 
 **Retired:**
 - `install-litellm.sh` — archived, superseded by gitops
-- `llama-proxy.py` — stopped and removed from `start-opencode-stable.sh` (LiteLLM handles retries natively)
+- `llama-proxy.py` — deleted (proxy is gone; context overflow returns an error to the caller)
 
 **Observability (wire up in this phase):**
 LiteLLM exports Prometheus metrics at `/metrics` natively — token usage, latency, error rates per model. Add a `ServiceMonitor` or static scrape job to Prometheus so the metrics are available from day one. No custom code required.
@@ -669,8 +669,7 @@ LiteLLM exports Prometheus metrics at `/metrics` natively — token usage, laten
 2. `curl -sf -H "Authorization: Bearer $LITELLM_MASTER_KEY" https://litellm.amer.dev/v1/models` returns JSON list including `qwen3-35b`
 3. Test completion request returns a valid response end-to-end through LiteLLM
 4. opencode starts a session and completes at least one tool call successfully
-5. `pgrep -f llama-proxy` returns nothing — proxy retired
-6. Multi-runner test: add archlinux endpoint to ConfigMap (or a duplicate murderbot entry), send 10 concurrent requests — LiteLLM distributes across backends; `GET /metrics` shows requests split across both deployments
+5. Multi-runner test: add archlinux endpoint to ConfigMap (or a duplicate murderbot entry), send 10 concurrent requests — LiteLLM distributes across backends; `GET /metrics` shows requests split across both deployments
 7. Model swap test: add a model entry to ConfigMap → ArgoCD syncs → new model appears in `/v1/models` without touching any local scripts
 8. ArgoCD app is synced and healthy
 

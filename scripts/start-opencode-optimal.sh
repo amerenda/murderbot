@@ -185,11 +185,6 @@ if [ -n "$pids" ]; then
 else
     ts INFO "No llama-server running"
 fi
-pids=$(pgrep -f "llama-proxy\.py" 2>/dev/null || true)
-if [ -n "$pids" ]; then
-    echo "$pids" | xargs kill 2>/dev/null || true
-    ts INFO "llama-proxy stopped"
-fi
 sleep 1
 
 # ─── PRE-FLIGHT: GPU STATE ────────────────────────────────────────────────────

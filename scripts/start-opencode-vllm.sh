@@ -57,12 +57,6 @@ if [ -n "$pids" ]; then
 else
     echo "  ✓ No llama-server running"
 fi
-pids=$(pgrep -f "llama-proxy\.py" 2>/dev/null || true)
-if [ -n "$pids" ]; then
-    echo "  Stopping llama-proxy (PIDs: $pids)..."
-    echo "$pids" | xargs kill 2>/dev/null || true
-    echo "  ✓ llama-proxy stopped"
-fi
 sleep 1
 
 # ─── PRE-FLIGHT: GPU MEMORY CHECK ────────────────────────────────────────────

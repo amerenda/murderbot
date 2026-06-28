@@ -2,7 +2,8 @@
 # start-opencode-stable.sh — Qwen3.6 + llama.cpp (native tool calling)
 #
 # Architecture:
-#   opencode → llama-proxy (port 8089) → llama-server (port 8088)
+#   opencode → LiteLLM (https://litellm.amer.dev/v1)  → llama-server (port 8088)
+#   opencode → llama-server (port 8088, local fallback when LiteLLM key absent)
 #
 # Key flags:
 #
@@ -29,13 +30,6 @@
 #        — Strips past <think> blocks from conversation history. Prevents
 #          the "empty-think poison" and saves tokens across multi-turn sessions.
 #
-#   3. llama-proxy.py — ENABLED by default (NO_PROXY=false)
-#      Intercepts HTTP 400 context overflows, strips+retries transparently.
-#      Proxy truncation is DISABLED (MAX_TOOL_CHARS=0). The jinja template handles
-#      truncation at render time (max_tool_response_chars: 3000), which keeps raw
-#      messages unchanged so llama-server can reuse KV cache across turns.
-#      Exposes Prometheus metrics at :8089/metrics.
-#      Disable with: NO_PROXY=true ./start-opencode-stable.sh
 #
 # Models:
 #   qwen36        (default) — Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf    (~21GB, fully on GPU)
@@ -49,7 +43,7 @@
 #   ./start-opencode-stable.sh                              # default: Qwen3.6-35B (no MTP)
 #   ./start-opencode-stable.sh --model qwen36-mtp           # MTP variant for speed
 #   ./start-opencode-stable.sh --model qwen3-coder-next     # coding-focused model
-#   ./start-opencode-stable.sh --restart                    # stop existing server + proxy first
+#   ./start-opencode-stable.sh --restart                    # stop existing server first
 #
 # Env overrides:
 #   CTX=196608 ./start-opencode-stable.sh                  # larger context (GPU has headroom up to ~229K)
@@ -57,7 +51,6 @@
 #   NGL=38 ./start-opencode-stable.sh                      # fewer GPU layers
 #   VERBOSE=true ./start-opencode-stable.sh                # verbose server logging
 #   OPENCODE_RESERVED=80000 ./start-opencode-stable.sh     # less aggressive compaction
-#   NO_PROXY=true ./start-opencode-stable.sh               # skip proxy, point opencode directly at server
 #
 # VRAM context headroom (RTX 4000 Blackwell, 24 GB):
 #   NOTE: observed actual free VRAM at CTX 196608 was only ~73 MB (table below is
@@ -129,41 +122,10 @@ case "$MODEL_VARIANT" in
     exit 1 ;;
 esac
 
-# ─── PROXY + OPENCODE TOKEN BUDGET ──────────────────────────────────────────
-# llama-proxy.py catches 400 context-overflow errors and retries with fewer
-# messages. This means OPENCODE_CTX can equal the server CTX — no artificial
-# reduction needed. Compaction (reserved) fires early to keep context healthy;
-# the proxy is the emergency safety net for spikes (e.g. 47KB file reads).
-#
-# OPENCODE_CTX      = full server CTX (proxy handles overflow)
-# OPENCODE_OUTPUT   = max tokens per response
-# OPENCODE_RESERVED = compaction trigger: fires at CTX - reserved actual tokens
-#
-# WHY reserved=100000 (threshold = 31072 tokens):
-#   The proxy strips messages transparently before requests reach the server.
-#   The server therefore reports back a "small" prompt_tokens (e.g. 40-70K
-#   after stripping). OpenCode uses this server-reported count to decide
-#   when to compact. With reserved=70000, threshold=61072 — close enough to
-#   the stripped context size that compaction never fires (server reports 50K,
-#   threshold is 61K, so opencode thinks context is fine).
-#
-#   With reserved=100000, threshold=31072. Any request that needed stripping
-#   reports 40K+ actual tokens from the server → exceeds threshold → compaction
-#   fires and summarises the session. After compaction, context drops to ~10K
-#   and the cycle resets cleanly. Without stripping (fresh session) the server
-#   reports <30K, no compaction.
-#
-#   NOTE: llama-server reports actual Qwen3 token counts (not GPT estimates),
-#   so the threshold comparison here is in real tokens, not tiktoken estimates.
+# ─── OPENCODE TOKEN BUDGET ───────────────────────────────────────────────────
 OPENCODE_CTX="${OPENCODE_CTX:-${CTX}}"
 OPENCODE_OUTPUT="${OPENCODE_OUTPUT:-8192}"
 OPENCODE_RESERVED="${OPENCODE_RESERVED:-85000}"
-
-# ─── PROXY CONFIG ─────────────────────────────────────────────────────────────
-PROXY_PORT=8089
-PROXY_LOG="/tmp/llama-proxy.log"
-NO_PROXY="${NO_PROXY:-false}"
-PROXY_SCRIPT="$SCRIPT_DIR/proxy/llama-proxy.py"
 
 MODEL_NAME="$(basename "$MODEL")"
 
@@ -221,15 +183,6 @@ stop_server() {
   fi
 }
 
-stop_proxy() {
-  local PIDS
-  PIDS=$(pgrep -f "python3.*llama-proxy\.py" 2>/dev/null || true)
-  if [ -n "$PIDS" ]; then
-    echo "Stopping llama-proxy (PIDs: $PIDS)..."
-    echo "$PIDS" | xargs kill 2>/dev/null || true
-    sleep 1
-  fi
-}
 
 stop_comfyui() {
   local BATCH_PIDS
@@ -255,7 +208,6 @@ stop_comfyui() {
 
 # ─── STOP IF RESTARTING ──────────────────────────────────────────────────────
 if [ "$RESTART" = true ]; then
-  stop_proxy
   stop_server
   echo "Waiting for VRAM to drain..."
   sleep 5
@@ -397,37 +349,6 @@ if ! pgrep -f "llama-server" > /dev/null 2>&1; then
   echo ""
 fi
 
-# ─── START PROXY ─────────────────────────────────────────────────────────────
-# Start proxy before writing config so we know the actual port opencode will use.
-PROXY_PID=""
-OPENCODE_PORT="$PORT"  # default: direct to server
-
-if [ "$NO_PROXY" != "true" ]; then
-  if ! [ -f "$PROXY_SCRIPT" ]; then
-    echo "WARNING: llama-proxy.py not found at $PROXY_SCRIPT — running without proxy" >&2
-  else
-    stop_proxy
-    echo "Starting llama-proxy..."
-    MAX_TOOL_CHARS="${MAX_TOOL_CHARS:-0}"
-    python3 "$PROXY_SCRIPT" \
-      --upstream "http://127.0.0.1:${PORT}" \
-      --port "$PROXY_PORT" \
-      --max-tool-chars "$MAX_TOOL_CHARS" \
-      >> "$PROXY_LOG" 2>&1 &
-    PROXY_PID=$!
-    sleep 0.5
-    if ! kill -0 "$PROXY_PID" 2>/dev/null; then
-      echo "WARNING: llama-proxy failed to start — running without proxy" >&2
-    else
-      OPENCODE_PORT="$PROXY_PORT"
-      echo "llama-proxy ready (PID $PROXY_PID, log: $PROXY_LOG)"
-    fi
-  fi
-else
-  echo "Proxy disabled (NO_PROXY=true) — opencode → llama-server directly"
-fi
-echo ""
-
 # ─── LITELLM KEY ─────────────────────────────────────────────────────────────
 # Auto-fetch from k8s secret if not already set in env
 if [ -z "${LITELLM_MASTER_KEY:-}" ]; then
@@ -494,7 +415,7 @@ else
       "npm": "@ai-sdk/openai-compatible",
       "name": "llama-server (stable)",
       "options": {
-        "baseURL": "http://127.0.0.1:${OPENCODE_PORT}/v1",
+        "baseURL": "http://127.0.0.1:${PORT}/v1",
         "apiKey": "local"
       },
       "models": {
@@ -521,10 +442,7 @@ OPENCODE_JSON
   echo "  compact:    auto, reserved=$OPENCODE_RESERVED"
   echo "  perms:      allow (all tool calls auto-approved)"
   if [ "$OPENCODE_PORT" = "$PROXY_PORT" ]; then
-    echo "  proxy:      http://127.0.0.1:$PROXY_PORT → http://127.0.0.1:$PORT"
-  else
-    echo "  proxy:      DISABLED (direct to server)"
-  fi
+    echo "  server:     http://127.0.0.1:$PORT"
   echo ""
 fi
 
@@ -533,6 +451,4 @@ echo "Starting opencode..."
 OPENCODE_CONFIG_CONTENT="$OPENCODE_CONFIG_JSON" opencode
 
 # Cleanup
-[ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true
-stop_proxy
 kill "${WATCHER_PID:-}" 2>/dev/null || true

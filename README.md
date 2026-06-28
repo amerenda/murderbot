@@ -5,7 +5,7 @@ Scripts, templates, and Docker image source for running local LLMs on murderbot 
 ## Stack
 
 ```
-opencode → llama-proxy (:8089) → llama-server (:8088, Docker/Komodo) → GPU
+opencode → LiteLLM (https://litellm.amer.dev/v1) → llama-server (:8088, Docker/Komodo) → GPU
 ```
 
 - **Inference**: [llama.cpp](https://github.com/ggerganov/llama.cpp) compiled into `amerenda/murderbot-llm` Docker image (`llm/Dockerfile`, CUDA 12.8, sm_120a)
@@ -13,7 +13,6 @@ opencode → llama-proxy (:8089) → llama-server (:8088, Docker/Komodo) → GPU
 - **Model**: Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf — MoE, ~21 GB on GPU
 - **Template**: `llm/templates/froggeric-v20.jinja` — baked into the image at `/app/templates/`
 - **Agent**: [opencode](https://opencode.ai) — coding agent harness
-- **Proxy**: `llama-proxy.py` — context overflow recovery (see below)
 
 ## Production deployment
 
@@ -28,55 +27,16 @@ The llama-server container is managed by **Komodo** — not the shell scripts in
 `start-opencode-stable.sh` is for local development — it runs llama-server directly (not via Docker) and wires up opencode:
 
 ```bash
-./start-opencode-stable.sh                   # default: Qwen3.6-35B, 196K context
+./start-opencode-stable.sh                   # default: Qwen3.6-35B
 ./start-opencode-stable.sh --restart         # kill existing server first, then start
 ./start-opencode-stable.sh --model qwen36-mtp   # MTP variant (~150 t/s, needs MTP GGUF)
 CTX=229376 ./start-opencode-stable.sh        # larger context (tight but usable, ~0.9 GB free)
-NO_PROXY=true ./start-opencode-stable.sh     # skip proxy, point opencode directly at server
 ```
 
 The script:
 1. Starts `llama-server` on `:8088` (waits until ready)
-2. Starts `llama-proxy.py` on `:8089`
-3. Writes `~/.config/opencode/opencode.json` pointing at the proxy
-4. Launches `opencode`
-5. Kills proxy on exit
-
-## llama-proxy.py — overflow recovery
-
-### The problem
-
-opencode uses the GPT `cl100k_base` tiktoken tokenizer for all OpenAI-compatible providers. Qwen3's XML tool-call format tokenizes 2–4× heavier than GPT estimates. On top of that, `--jinja` injects the full tools array into the system message at render time — those tokens are invisible to opencode's counter. Result: opencode sends requests that exceed llama-server's context window → immediate HTTP 400, session dead.
-
-### The solution
-
-The proxy intercepts every `/v1/chat/completions` request. On a 400 response it:
-
-1. Strips the 2 largest `tool` role messages from conversation history (file reads are the worst offenders) plus the `assistant` message that called the tool
-2. Retries the request
-3. Repeats up to 10 times, falling back to removing oldest messages if no tool messages remain
-4. Always protects: the system prompt (`messages[0]`) and the last 4 messages (current turn)
-
-The proxy is transparent on the happy path — it streams bytes through with no overhead.
-
-### Observed behavior
-
-- Caught 3 overflows in a 15-minute session with no crashes
-- Each overflow stripped 45–54 KB of old tool output (file reads)
-- Without the proxy these would have been hard 400s killing the session
-- Logs to `/tmp/llama-proxy.log`
-
-```
-[proxy] 400 overflow → stripped 2 msgs (53,951 bytes, retry 1/10, 32 msgs remain)
-```
-
-### Manual usage
-
-```bash
-python3 llama-proxy.py                                      # default: :8089 → :8088
-python3 llama-proxy.py --upstream http://127.0.0.1:8088 --port 8089
-python3 llama-proxy.py --quiet                              # suppress log output
-```
+2. Writes `~/.config/opencode/opencode.json` pointing at LiteLLM (or direct if key absent)
+3. Launches `opencode`
 
 ## Models
 
@@ -124,6 +84,5 @@ KV cache uses `q4_0` quantization (`-ctk q4_0 -ctv q4_0`).
 | `llm/entrypoint.sh` | Container entry point — server flags, model path, template kwargs |
 | `llm/templates/froggeric-v20.jinja` | **Active template** — baked into the image at build time |
 | `start-opencode-stable.sh` | Local dev launcher — runs llama-server directly (not Docker) |
-| `llama-proxy.py` | Overflow recovery proxy |
 | `templates/froggeric-v20.jinja` | Mirror of `llm/templates/` — keep in sync; used by local dev script |
 | `CLAUDE.md` | opencode system instructions — file reading limits, tool discipline |

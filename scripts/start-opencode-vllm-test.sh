@@ -39,8 +39,6 @@ if [ -n "$pids" ]; then
 else
     echo "  ✓ No llama-server running"
 fi
-pids=$(pgrep -f "llama-proxy\.py" 2>/dev/null || true)
-[ -n "$pids" ] && echo "$pids" | xargs kill 2>/dev/null || true
 sleep 1
 
 # ─── DOWNLOAD TEST MODEL ─────────────────────────────────────────────────────
