@@ -31,7 +31,7 @@ set -euo pipefail
 RESTART=false
 PROMPT_TEXT=""
 PROMPT_FILE=""
-MODEL_VARIANT="mtp"            # mtp | base | <full path>
+MODEL_VARIANT="27b"            # 27b | mtp | base | <full path>
 MODEL_NAME_CLI=""
 DEFAULT_PROMPTS_DIR="$HOME/claude"
 
@@ -64,6 +64,9 @@ MODELS_DIR="/mnt/storage/models/llms/qwen36"
 MTP_ENABLE=false
 
 case "$MODEL_VARIANT" in
+  27b)
+    MODEL="${MODELS_DIR}/Qwen3.6-27B-UD-Q4_K_XL.gguf"
+    MTP_ENABLE=false ;;
   mtp)
     MODEL="${MODELS_DIR}/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf"
     MTP_ENABLE=true ;;
@@ -75,7 +78,7 @@ case "$MODEL_VARIANT" in
     MODEL="$MODEL_VARIANT"
     MTP_ENABLE=false ;;
   *)
-    echo "ERROR: Unknown --model value '$MODEL_VARIANT'. Use: mtp, base, or an absolute path." >&2
+    echo "ERROR: Unknown --model value '$MODEL_VARIANT'. Use: 27b, mtp, base, or an absolute path." >&2
     exit 1 ;;
 esac
 
@@ -157,11 +160,10 @@ else
 fi
 
 # ─── SERVER CONFIGURATION ────────────────────────────────────────────────────
-NGL="${NGL:-40}"            # GPU layers — 40 covers all layers of Qwen3.6-35B-A3B MoE
+NGL="${NGL:-40}"            # GPU layers — 40 covers all Qwen3.6 variants
 FA=1                        # Flash attention — required at this model size
 CTK="q4_0"                  # KV cache key quant   — best speed + max context
 CTV="q4_0"                  # KV cache value quant
-CTX="${CTX:-65536}"          # 64k context — keeps tool calling reliable; override via CTX=131072 if needed
 BATCH="${BATCH:-512}"
 THREADS="${THREADS:-6}"
 HOST="0.0.0.0"
@@ -169,8 +171,20 @@ PORT=8088                   # OpenClaude expects http://127.0.0.1:8088/v1
 PARALLEL=1                  # single slot — only one client; prevents KV cache exhaustion
 REPEAT_PENALTY=1.1
 
+# Context window + sampling — auto-tune per model
+MODEL_BASENAME="$(basename "$MODEL")"
+if [[ "$MODEL_BASENAME" == *"Qwen3.6-27B"* ]]; then
+    CTX="${CTX:-131072}"    # dense 27B — 131k safe
+    TEMP="${TEMP:-0.6}"; TOP_K="${TOP_K:-20}"; TOP_P="${TOP_P:-0.95}"
+elif [[ "$MODEL_BASENAME" == *"Qwen3.6-35B-A3B"* ]]; then
+    CTX="${CTX:-65536}"     # MoE 35B — 64k for tool-call reliability
+    TEMP="${TEMP:-0.6}"; TOP_K="${TOP_K:-20}"; TOP_P="${TOP_P:-0.95}"
+else
+    CTX="${CTX:-32768}"
+    TEMP="${TEMP:-0.7}"; TOP_K="${TOP_K:-40}"; TOP_P="${TOP_P:-0.95}"
+fi
+
 VERBOSE="${VERBOSE:-false}"
-REASONING="${REASONING:-auto}"  # auto/on/off
 EFFORT="${EFFORT:-high}"        # low/medium/high/max
 CONTINUE="${CONTINUE:-false}"
 
@@ -257,8 +271,10 @@ SERVER_ARGS=(
   --port  "$PORT"
   --jinja
   --metrics
-  --reasoning         "$REASONING"
-  --reasoning-format  deepseek
+  --reasoning-format  none
+  --temp              "$TEMP"
+  --top-k             "$TOP_K"
+  --top-p             "$TOP_P"
   --parallel          "$PARALLEL"
   --repeat-penalty    "$REPEAT_PENALTY"
   --no-context-shift
