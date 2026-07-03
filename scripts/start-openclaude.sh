@@ -261,6 +261,7 @@ SERVER_ARGS=(
   --reasoning-format  deepseek
   --parallel          "$PARALLEL"
   --repeat-penalty    "$REPEAT_PENALTY"
+  --no-context-shift
   --timeout           0
   $VERBOSE_FLAG
 )
